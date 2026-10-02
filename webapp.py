@@ -121,6 +121,66 @@ async def api_me_notify(request):
     return web.json_response({"notify": notify})
 
 
+# ── «Сейчас играет» для Discord ──────────────────────────────────────────
+# Мини-приложение сообщает, что и с какой секунды играет; программа-компаньон на компьютере
+# слушателя забирает это и показывает в профиле Discord. Сам сервер в Discord не ходит.
+
+_now_playing: dict[int, dict] = {}
+_bot_username: str | None = None
+
+
+def presence_key(uid: int) -> str:
+    """Отдельный ключ для компаньона Discord, чтобы не раздавать ключ от аудио."""
+    return hmac.new(BOT_TOKEN.encode(), f"presence:{uid}".encode(), hashlib.sha256).hexdigest()[:32]
+
+
+@routes.post("/api/nowplaying")
+async def api_nowplaying(request):
+    uid = user_id(request)
+    body = await request.json()
+    try:
+        tid, pos = int(body.get("id")), max(0.0, float(body.get("pos") or 0))
+    except (TypeError, ValueError):
+        raise web.HTTPBadRequest()
+    _now_playing[uid] = {"id": tid, "pos": pos, "playing": bool(body.get("playing")),
+                         "ts": time.time()}
+    return web.json_response({"ok": True})
+
+
+@routes.get("/api/presence/key")
+async def api_presence_key(request):
+    uid = user_id(request)
+    return web.json_response({"uid": uid, "key": presence_key(uid)})
+
+
+@routes.get("/api/presence")
+async def api_presence(request):
+    """Состояние для компаньона: ключ в ссылке, потому что входа через Telegram у него нет."""
+    global _bot_username
+    uid = request.query.get("u", "")
+    if not uid.isdigit() or not hmac.compare_digest(request.query.get("k", ""),
+                                                    presence_key(int(uid))):
+        raise web.HTTPUnauthorized()
+    state = _now_playing.get(int(uid))
+    # нет вестей больше полутора минут — приложение закрыто, статус снимаем
+    if not state or not state["playing"] or time.time() - state["ts"] > 90:
+        return web.json_response({"playing": False})
+    track = await db.get_track(state["id"])
+    if not track:
+        return web.json_response({"playing": False})
+    if _bot_username is None:
+        try:
+            _bot_username = (await request.app["bot"].me()).username or ""
+        except Exception:
+            _bot_username = ""
+    return web.json_response({
+        "playing": True, "title": track["title"], "artist": track["artist"],
+        "cover": track["cover"], "duration": track["duration"],
+        "position": state["pos"] + (time.time() - state["ts"]),
+        "brand": BRAND, "link": f"https://t.me/{_bot_username}" if _bot_username else None,
+    })
+
+
 @routes.post("/api/listen")
 async def api_listen(request):
     """Приложение раз в полминуты сообщает, сколько секунд трека реально прозвучало."""

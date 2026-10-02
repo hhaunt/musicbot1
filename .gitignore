@@ -9,3 +9,5 @@ assets/
 __pycache__/
 *.pyc
 .venv/
+# личный код компаньона Discord
+discord/config.json

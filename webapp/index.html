@@ -417,6 +417,17 @@ body.open-sheet #shade{opacity:1;pointer-events:auto}
   </form>
   <div class="note" style="padding:10px 0 0">Комментарий видят все слушатели вместе с вашим именем. Кнопка со временем привязывает его к моменту трека.</div>
 </section>
+<section class="sheet" id="dcsheet">
+  <h2>СТАТУС В DISCORD</h2>
+  <div class="note" style="padding:12px 0 0">Discord покажет у вас в профиле трек, исполнителя и сколько прошло.
+    Для этого на компьютере, где открыт Discord, должна работать маленькая программа-компаньон
+    (папка <b>discord</b> в проекте бота). При первом запуске она попросит этот код:</div>
+  <div class="cmform">
+    <input id="dccode" readonly aria-label="Код для компаньона Discord">
+    <button type="button" class="pill inv" id="dccopy">Скопировать</button>
+  </div>
+  <div class="note" style="padding:10px 0 0">Код личный: с ним можно видеть, что вы сейчас слушаете. Не отправляйте его другим.</div>
+</section>
 <section class="sheet" id="profile">
   <h2>ТЕМА</h2>
   <div class="themes" id="themes"></div>
@@ -1010,6 +1021,29 @@ $('#cmform').addEventListener('submit', async e => {
   } catch (err) { toast(err.message); }
 });
 
+/* ── «сейчас играет» для статуса в Discord ── */
+function reportNow() {
+  if (!S.cur || !S.me) return;
+  api('nowplaying', {method: 'POST', body: JSON.stringify({id: S.cur.id, pos: audio.currentTime || 0, playing: !audio.paused})})
+    .catch(() => {});
+}
+['playing', 'pause', 'seeked'].forEach(ev => audio.addEventListener(ev, reportNow));
+setInterval(() => { if (!audio.paused) reportNow(); }, 25000);  // сервер снимает статус, если вестей нет 90 секунд
+async function openDiscord() {
+  tap();
+  $('#dccode').value = 'Загружаю…';
+  openSheet('#dcsheet');
+  try {
+    const {uid, key} = await api('presence/key');
+    $('#dccode').value = btoa(JSON.stringify({url: location.origin, u: uid, k: key}));
+  } catch (e) { $('#dccode').value = ''; toast('Не удалось получить код'); }
+}
+$('#dccopy').onclick = async () => {
+  const input = $('#dccode');
+  try { await navigator.clipboard.writeText(input.value); toast('Код скопирован'); }
+  catch (e) { input.focus(); input.select(); toast('Выделил код — скопируйте его вручную'); }
+};
+
 /* ── текст песни: с таймкодами подсвечивается и прокручивается сам ── */
 const LYR = {id: null, lines: null, cur: -1, touched: 0};
 function resetLyrics() {
@@ -1362,7 +1396,8 @@ async function renderPage(my) {
         `Пользователей всего: ${me.stats.all.total} · бот: ${me.stats.bot.total} · приложение: ${me.stats.app.total} · за сутки: ${me.stats.all.day}`) : null,
       h('div', {class: 'pillrow'}, tabBtn('history', 'История'), tabBtn('stats', 'Статистика'), tabBtn('subs', 'Подписки'),
         h('button', {class: 'pill', onclick: () => openPage({type: 'people'})}, 'Люди'),
-        h('button', {class: 'pill', onclick: () => { tap(); openSheet('#profile'); }}, 'Оформление'), pub, notify),
+        h('button', {class: 'pill', onclick: () => { tap(); openSheet('#profile'); }}, 'Оформление'),
+        h('button', {class: 'pill', onclick: openDiscord}, 'Discord'), pub, notify),
       h('div', {class: 'note'}, me.public ? 'Другие слушатели видят ваше имя, аватарку и лайкнутые треки. История им не видна.'
                                           : 'Вас не видно в разделе «Люди». Откройте профиль, чтобы на вас могли подписаться.'),
       ...body,
