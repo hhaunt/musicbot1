@@ -122,6 +122,7 @@ INSERT OR IGNORE INTO usage SELECT id, 'app', 0, 0 FROM users;
 
 async def init() -> None:
     global _db
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     _db = await aiosqlite.connect(DB_PATH)
     _db.row_factory = aiosqlite.Row
     await _db.executescript(SCHEMA)

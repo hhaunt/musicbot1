@@ -19,7 +19,11 @@ elif WEBAPP_URL and not WEBAPP_URL.startswith("https://"):
     WEBAPP_URL = "https://" + WEBAPP_URL  # Telegram принимает только HTTPS-ссылки
 WEBAPP_PORT = int(os.getenv("WEBAPP_PORT") or os.getenv("PORT") or 8080)
 
-DB_PATH = BASE_DIR / "mono.db"
+# Где хранить базу. По умолчанию — рядом с кодом, но при пересборке из GitHub эта папка
+# создаётся заново и база пропадает. Укажите DATA_DIR на постоянный диск хостинга (Volume),
+# например DATA_DIR=/data, — тогда лайки, плейлисты и статистика переживут обновления.
+DATA_DIR = Path(os.getenv("DATA_DIR") or BASE_DIR)
+DB_PATH = DATA_DIR / "mono.db"
 TMP_DIR = BASE_DIR / "tmp"
 CACHE_DIR = BASE_DIR / "cache"     # аудио для мини-приложения
 CACHE_FILES = 40                   # сколько треков держать в кэше
