@@ -1,19 +1,35 @@
 """Инлайн-клавиатуры. Только монохромные глифы — без цветных эмодзи.
 
-Контекст очереди (ctx) в callback_data: s — поиск, f — избранное, l<ID> — плейлист.
+Контекст очереди (ctx) в callback_data: s — поиск, f — избранное,
+l<ID> — плейлист, a<ID> — альбом.
 """
 from aiogram.types import InlineKeyboardButton as Btn
-from aiogram.types import InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardMarkup, WebAppInfo
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+from config import WEBAPP_URL
+
+HEART = "♥︎"  # с селектором «текстовый вид», чтобы Telegram не рисовал цветной эмодзи
 MENU = Btn(text="☰  Меню", callback_data="menu")
 
 
 def menu() -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     b.row(Btn(text="⌕  Поиск", callback_data="search"))
-    b.row(Btn(text="★  Избранное", callback_data="fav:0"),
-          Btn(text="≡  Плейлисты", callback_data="pls"))
+    b.row(Btn(text="◎  Альбомы", callback_data="albums"),
+          Btn(text=f"{HEART}  Лайки", callback_data="fav:0"))
+    b.row(Btn(text="≡  Плейлисты", callback_data="pls"))
+    if WEBAPP_URL:
+        b.row(Btn(text="▷  Открыть плеер", web_app=WebAppInfo(url=WEBAPP_URL)))
+    return b.as_markup()
+
+
+def albums(album_ids: list[int]) -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    for i, aid in enumerate(album_ids, 1):
+        b.add(Btn(text=f"{i:02d}", callback_data=f"alb:{aid}:0"))
+    b.adjust(4)
+    b.row(Btn(text="⌕  Искать ещё", callback_data="albums"), MENU)
     return b.as_markup()
 
 
@@ -41,7 +57,7 @@ def track_list(track_ids: list[int], ctx: str, start: int = 1, page: int = 0,
 def player(tid: int, ctx: str, is_fav: bool) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     b.row(Btn(text="◁", callback_data=f"nav:{tid}:{ctx}:-1"),
-          Btn(text="★" if is_fav else "☆", callback_data=f"like:{tid}:{ctx}"),
+          Btn(text=HEART if is_fav else "♡", callback_data=f"like:{tid}:{ctx}"),
           Btn(text="＋", callback_data=f"addm:{tid}:{ctx}"),
           Btn(text="▷", callback_data=f"nav:{tid}:{ctx}:1"))
     if ctx.startswith("l"):
