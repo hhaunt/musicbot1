@@ -118,6 +118,56 @@ def _extract_playlist(url: str) -> tuple[str, list[Found]]:
     return (info.get("title") or "Импорт").strip(), tracks
 
 
+def _sc_found(t: dict) -> Found | None:
+    """Трек из API SoundCloud → Found."""
+    url, title = t.get("permalink_url"), t.get("title")
+    if not url or not title:
+        return None
+    user = t.get("user") or {}
+    art = (t.get("artwork_url") or user.get("avatar_url") or "").replace("-large.", "-t300x300.") or None
+    released = (t.get("release_date") or t.get("display_date") or t.get("created_at") or "")[:10] or None
+    return Found(url, title.strip(), (user.get("username") or "").strip(),
+                 int((t.get("full_duration") or t.get("duration") or 0) / 1000), art,
+                 (t.get("genre") or "").strip()[:40] or None,
+                 t.get("playback_count"), t.get("likes_count"), released)
+
+
+async def _soundcloud_playlist(url: str) -> tuple[str, list[Found]] | None:
+    """Плейлист SoundCloud через его открытый веб-API. Полностью SoundCloud отдаёт только первые
+    5 треков, остальные — одними номерами; их дозапрашиваем пачками по 50.
+    None — ссылка ведёт не на плейлист (например, на профиль), пусть разбирается yt-dlp."""
+    global _sc_client_id
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30),
+                                     headers={"User-Agent": "Mozilla/5.0 MusicCloudBot"}) as s:
+        client_id = await _soundcloud_client_id(s)
+        if not client_id:
+            return None
+        async with s.get("https://api-v2.soundcloud.com/resolve",
+                         params={"url": url, "client_id": client_id}) as r:
+            if r.status == 404:
+                raise ImportError_("Плейлист не найден — возможно, он закрыт или удалён")
+            if r.status in (401, 403):
+                _sc_client_id = None
+                return None
+            data = await r.json(content_type=None) or {}
+        if data.get("kind") == "track":
+            items, title = [data], data.get("title")
+        elif isinstance(data.get("tracks"), list):
+            items, title = data["tracks"][:IMPORT_LIMIT], data.get("title")
+        else:
+            return None
+        full = {t["id"]: t for t in items if t.get("id") and t.get("title")}
+        missing = [t["id"] for t in items if t.get("id") and not t.get("title")]
+        for i in range(0, len(missing), 50):
+            async with s.get("https://api-v2.soundcloud.com/tracks",
+                             params={"ids": ",".join(map(str, missing[i:i + 50])),
+                                     "client_id": client_id}) as r:
+                for t in (await r.json(content_type=None) if r.status == 200 else None) or []:
+                    full[t.get("id")] = t
+    tracks = [f for f in (_sc_found(full[t["id"]]) for t in items if t.get("id") in full) if f]
+    return (title or "Импорт").strip(), tracks
+
+
 async def import_playlist(url: str) -> tuple[str, list[Found]]:
     """(название, треки) плейлиста по ссылке с YouTube, SoundCloud, Bandcamp или Deezer."""
     parts = urlparse(url.strip())
@@ -135,7 +185,17 @@ async def import_playlist(url: str) -> tuple[str, list[Found]]:
         host = (urlparse(url).hostname or "").lower()
         if not (host == "soundcloud.com" or host.endswith(".soundcloud.com")):
             raise ImportError_("Короткая ссылка ведёт не на SoundCloud")
-    if host.endswith("deezer.com"):
+    sc_result = None
+    if host == "soundcloud.com" or host.endswith(".soundcloud.com"):
+        try:
+            sc_result = await _soundcloud_playlist(url.strip())
+        except ImportError_:
+            raise
+        except Exception:
+            sc_result = None  # не вышло через API SoundCloud — пробуем как раньше, через yt-dlp
+    if sc_result:
+        title, tracks = sc_result
+    elif host.endswith("deezer.com"):
         found = re.search(r"/playlist/(\d+)", parts.path)
         if not found:
             raise ImportError_("Нужна ссылка именно на плейлист Deezer")
@@ -148,7 +208,8 @@ async def import_playlist(url: str) -> tuple[str, list[Found]]:
         except Exception as e:
             raise ImportError_("Не удалось прочитать плейлист — возможно, он закрыт") from e
     if not tracks:
-        raise ImportError_("В плейлисте не нашлось треков")
+        raise ImportError_("В плейлисте не нашлось доступных треков — возможно, он закрыт "
+                           "или ссылка ведёт не на плейлист")
     return title[:40], tracks[:IMPORT_LIMIT]
 
 
