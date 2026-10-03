@@ -260,44 +260,83 @@ def _to_mp3(src: Path) -> Path:
     return dst
 
 
-def _download(url: str, hint: str = "") -> Path:
-    """Скачивает трек. Если он закрыт DRM или недоступен, ищет тот же трек в другой загрузке
-    («исполнитель - название») — в основном источнике, а затем на YouTube."""
-    query = url[len(SEARCH_PREFIX):] if url.startswith(SEARCH_PREFIX) else hint
-    candidates = [] if url.startswith(SEARCH_PREFIX) else [url]
-    sources = [SEARCH_SOURCE] + (["ytsearch"] if SEARCH_SOURCE != "ytsearch" else [])
+def _download_any(candidates: list[str], query: str) -> Path:
+    """Пробует ссылки по очереди; если ни одна не скачалась — последняя попытка на YouTube."""
     last_error: Exception = RuntimeError("трек не найден")
     tried: set[str] = set()
-
-    def attempt(link: str) -> Path | None:
-        nonlocal last_error
+    links = list(candidates)
+    if query and SEARCH_SOURCE != "ytsearch":
+        links.append(None)  # метка: здесь подключаем YouTube
+    for link in links:
+        if link is None:
+            try:
+                with YoutubeDL({"quiet": True, "no_warnings": True, "extract_flat": True,
+                                "skip_download": True}) as ydl:
+                    info = ydl.extract_info(f"ytsearch3:{query}", download=False) or {}
+                links += [f.url for f in map(_entry, info.get("entries") or []) if f]
+            except Exception:
+                pass
+            continue
         if link in tried:
-            return None
+            continue
         tried.add(link)
         try:
             return _fetch(link)
         except Exception as e:
             last_error = e
-            return None
-
-    for link in candidates:
-        if (path := attempt(link)):
-            return path
-    if query:
-        for source in sources:
-            try:
-                with YoutubeDL({"quiet": True, "no_warnings": True, "extract_flat": True,
-                                "skip_download": True}) as ydl:
-                    info = ydl.extract_info(f"{source}5:{query}", download=False) or {}
-            except Exception:
-                continue
-            for f in map(_entry, info.get("entries") or []):
-                if f and (path := attempt(f.url)):
-                    return path
     raise last_error
 
 
+# ── SoundCloud напрямую: видно, какие треки можно проиграть ──────────────
+
+def _sc_playable(t: dict) -> bool:
+    """Трек играет целиком: не закрыт правообладателем (BLOCK), не только 30-секундный отрывок
+    (SNIP) и есть хотя бы один незашифрованный поток. Зашифрованные (DRM) скачать нельзя."""
+    if t.get("policy") in ("BLOCK", "SNIP"):
+        return False
+    return any((x.get("format") or {}).get("protocol") in ("progressive", "hls") and not x.get("snipped")
+               for x in (t.get("media") or {}).get("transcodings") or [])
+
+
+def _norm(s: str) -> str:
+    return " ".join(re.findall(r"\w+", (s or "").casefold()))
+
+
+def _same_song(want: str, got: str) -> bool:
+    """Похоже ли найденное название на нужное: целиком входит или совпадает большинство слов."""
+    w, g = _norm(want), _norm(got)
+    if not w or w in g:
+        return True
+    words = set(w.split())
+    return len(words & set(g.split())) >= max(1, round(len(words) * 0.6))
+
+
+async def sc_search(query: str, limit: int = 20) -> list[Found]:
+    """Поиск по SoundCloud, в котором заранее отброшены треки, которые не сыграют."""
+    global _sc_client_id
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15),
+                                     headers={"User-Agent": "Mozilla/5.0 MusicCloudBot"}) as s:
+        client_id = await _soundcloud_client_id(s)
+        if not client_id:
+            raise RuntimeError("нет ключа SoundCloud")
+        async with s.get("https://api-v2.soundcloud.com/search/tracks",
+                         params={"q": query, "limit": min(50, limit * 2), "client_id": client_id}) as r:
+            if r.status in (401, 403):
+                _sc_client_id = None
+            if r.status != 200:
+                raise RuntimeError(f"SoundCloud ответил {r.status}")
+            data = await r.json(content_type=None) or {}
+    return [f for t in data.get("collection") or [] if _sc_playable(t) and (f := _sc_found(t))][:limit]
+
+
 async def search(query: str, limit: int = 8) -> list[Found]:
+    if SEARCH_SOURCE == "scsearch":
+        try:
+            found = await sc_search(query, limit)
+            if found:
+                return found
+        except Exception:
+            pass  # API недоступно — ищем как раньше, через yt-dlp
     return await asyncio.to_thread(_search, query, limit)
 
 
@@ -305,9 +344,19 @@ _downloads = asyncio.Semaphore(MAX_DOWNLOADS)
 
 
 async def download(url: str, hint: str = "") -> Path:
-    """hint — «исполнитель - название», чтобы найти замену, если по ссылке трек недоступен."""
+    """Скачивает трек. hint — «исполнитель - название»: если по ссылке трек закрыт или пропал,
+    берём другую загрузку той же песни — только играющую и с похожим названием."""
+    query = url[len(SEARCH_PREFIX):] if url.startswith(SEARCH_PREFIX) else hint
+    candidates = [] if url.startswith(SEARCH_PREFIX) else [url]
+    if query:
+        want = query.split(" - ", 1)[1] if " - " in query else query
+        try:
+            found = await sc_search(query, 10)
+            candidates += [f.url for f in found if _same_song(want, f.title)]
+        except Exception:
+            pass
     async with _downloads:
-        return await asyncio.to_thread(_download, url, hint)
+        return await asyncio.to_thread(_download_any, candidates, query)
 
 
 # ── обложки ──────────────────────────────────────────────────────────────

@@ -522,10 +522,30 @@ async def build_cloud(uid: int) -> dict:
     async def nothing():
         return []
 
+    # «ваш жанр» — не мировой чарт жанра (он почти весь из незнакомых зарубежных треков),
+    # а другие исполнители из вашей же истории, которых вы слушали в этом жанре
+    top_names = {name for name, _ in top}
+    genre_artists = Counter()
+    if genre:
+        for r in await db.listen_rows(uid):
+            name = _artist_of(r["title"], r["artist"])
+            if r["genre"] == genre and name and name not in top_names:
+                genre_artists[name] += r["seconds"]
+        for t in await db.favorites(uid):
+            name = _artist_of(t["title"], t["artist"])
+            if t["genre"] == genre and name and name not in top_names:
+                genre_artists[name] += 180
+
+    async def from_genre():
+        got = await asyncio.gather(*(music.artist_tracks(n, "popular", 8)
+                                     for n, _ in genre_artists.most_common(3)),
+                                   return_exceptions=True)
+        return [t for g in got if isinstance(g, list) for t in g]
+
     found = await asyncio.gather(
         *(_safe(music.artist_tracks(name, "popular", 15), f"artist {name}") for name, _ in top),
         _safe(music.related_tracks(top[0][0]) if top else nothing(), "related"),
-        _safe(music.genre_chart(genre, 25) if genre else nothing(), "genre"))
+        _safe(from_genre() if genre_artists else nothing(), "genre"))
     buckets = [("ваш исполнитель", quota, tracks)
                for quota, tracks in zip(quotas, found[:len(top)])]
     buckets.append(("похожее", CLOUD_RELATED, found[len(top)]))
