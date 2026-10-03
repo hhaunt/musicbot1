@@ -672,6 +672,17 @@ async def genre_chart(genre: str, limit: int = 25) -> list[Found]:
     return []
 
 
+async def related_tracks(name: str) -> list[Found]:
+    """Лучшие треки трёх самых похожих на исполнителя артистов (без него самого)."""
+    found = await _deezer_artist(name)
+    if not found:
+        return []
+    related = (await _deezer(f"artist/{found['id']}/related", limit=3)).get("data") or []
+    tops = await asyncio.gather(*(_deezer(f"artist/{r['id']}/top", limit=4) for r in related[:3]),
+                                return_exceptions=True)
+    return [_deezer_track(x) for t in tops if isinstance(t, dict) for x in t.get("data") or []]
+
+
 async def recommend(artists: list[str]) -> list[Found]:
     """Подборка по списку любимых исполнителей."""
     res = await asyncio.gather(*(_artist_picks(a) for a in artists), return_exceptions=True)

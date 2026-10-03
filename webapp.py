@@ -464,16 +464,33 @@ def _artist_of(title: str, artist: str) -> str:
     return (title.split(" - ")[0] if " - " in title else artist).strip()
 
 
-async def favorite_genre(uid: int, favs) -> str | None:
-    """Любимый жанр: по времени прослушивания, лайкнутый трек приравнен к трём минутам."""
-    score = Counter()
+async def taste_profile(uid: int) -> tuple[Counter, Counter]:
+    """Очки исполнителей и жанров по тому, что человек реально делал.
+    Исполнитель: лайк трека — 3, трек в плейлисте — 2, запуск — 1, каждая прослушанная
+    минута — 0,5, подписка — 6, лайк исполнителю — 4. Жанр: прослушанная минута — 1, лайк — 3."""
+    artists, genres = Counter(), Counter()
+    for title, artist, weight in await db.taste(uid):
+        if (name := _artist_of(title, artist)):
+            artists[name] += weight
     for r in await db.listen_rows(uid):
+        minutes = r["seconds"] / 60
+        if (name := _artist_of(r["title"], r["artist"])):
+            artists[name] += minutes * 0.5
         if r["genre"]:
-            score[r["genre"]] += r["seconds"]
-    for t in favs:
+            genres[r["genre"]] += minutes
+    for t in await db.favorites(uid):
         if t["genre"]:
-            score[t["genre"]] += 180
-    return score.most_common(1)[0][0] if score else None
+            genres[t["genre"]] += 3
+    for name in await db.social_targets(uid, "follow", "artist"):
+        artists[name] += 6
+    for name in await db.social_targets(uid, "like", "artist"):
+        artists[name] += 4
+    return artists, genres
+
+
+async def favorite_genre(uid: int, favs=None) -> str | None:
+    _, genres = await taste_profile(uid)
+    return genres.most_common(1)[0][0] if genres else None
 
 
 async def _safe(coro, what: str) -> list:
@@ -484,45 +501,37 @@ async def _safe(coro, what: str) -> list:
         return []
 
 
-# Из чего собирается подборка и сколько треков берётся из каждого источника
-CLOUD_MIX = (("подписка", 10), ("по лайкам", 12), ("ваш жанр", 8))
+CLOUD_TOP_ARTISTS = 3   # сколько любимых исполнителей берём в подборку
+CLOUD_ARTIST_SHARE = 20  # из 30 треков — сами любимые исполнители
+CLOUD_RELATED = 4        # похожие на самого любимого — для открытий, немного
+CLOUD_GENRE = 6          # популярное в любимом жанре
 
 
 async def build_cloud(uid: int) -> dict:
-    """Подборка из трёх источников: подписки, лайки и любимый жанр.
-
-    Общего чарта здесь нет намеренно: пока о вкусе ничего не известно, подборка пуста."""
+    """Подборка в первую очередь из треков исполнителей и жанра, которые человек больше
+    всего слушал и лайкал. Доли пропорциональны очкам из taste_profile; похожих исполнителей
+    совсем немного. Пока о вкусе ничего не известно, подборка пуста."""
     rows = await db.taste(uid)
-    favs = await db.favorites(uid)
-    subs = await db.social_targets(uid, "follow", "artist")
-    liked = Counter()
-    for t in favs:
-        name = _artist_of(t["title"], t["artist"])
-        if name:
-            liked[name] += 1
-    for name in await db.social_targets(uid, "like", "artist"):
-        liked[name] += 3
-    top_liked = [name for name, _ in liked.most_common(6)]
-    # самый любимый и двое случайных из остальных — чтобы подборка менялась
-    liked_pick = top_liked[:1] + random.sample(top_liked[1:], min(2, len(top_liked[1:])))
-    subs_pick = random.sample(subs, min(4, len(subs)))
-    genre = await favorite_genre(uid, favs)
-
-    async def from_subs():
-        got = await asyncio.gather(*(music.artist_top(a, 5) for a in subs_pick),
-                                   return_exceptions=True)
-        return [t for g in got if isinstance(g, list) for t in g]
+    artists, genres = await taste_profile(uid)
+    top = artists.most_common(CLOUD_TOP_ARTISTS)
+    genre = genres.most_common(1)[0][0] if genres else None
+    total = sum(score for _, score in top) or 1
+    # доли: у самого любимого больше всего треков, но не меньше трёх у каждого из топа
+    quotas = [max(3, round(CLOUD_ARTIST_SHARE * score / total)) for _, score in top]
 
     async def nothing():
         return []
 
     found = await asyncio.gather(
-        _safe(from_subs(), "subscriptions"),
-        _safe(music.recommend(liked_pick) if liked_pick else nothing(), "likes"),
+        *(_safe(music.artist_tracks(name, "popular", 15), f"artist {name}") for name, _ in top),
+        _safe(music.related_tracks(top[0][0]) if top else nothing(), "related"),
         _safe(music.genre_chart(genre, 25) if genre else nothing(), "genre"))
-    buckets = [(why, quota, tracks) for (why, quota), tracks in zip(CLOUD_MIX, found)]
+    buckets = [("ваш исполнитель", quota, tracks)
+               for quota, tracks in zip(quotas, found[:len(top)])]
+    buckets.append(("похожее", CLOUD_RELATED, found[len(top)]))
+    buckets.append(("ваш жанр", CLOUD_GENRE, found[len(top) + 1]))
     for _, _, tracks in buckets:
-        random.shuffle(tracks)
+        random.shuffle(tracks)  # каждый раз другие треки тех же любимых исполнителей
 
     known = {t.lower() for t, _, _ in rows} | {t.split(" - ", 1)[1].lower()
                                               for t, _, _ in rows if " - " in t}
@@ -538,26 +547,25 @@ async def build_cloud(uid: int) -> dict:
                 return True
         return False
 
-    # берём по одному треку из каждого источника по кругу — так подборка получается вперемешку;
-    # сначала в пределах долей, затем добираем из того, что осталось
-    left = {why: quota for why, quota, _ in buckets}
+    # по одному треку из каждого источника по кругу — подборка вперемешку; сначала в пределах
+    # долей, потом добираем: в первую очередь из любимых исполнителей (они стоят в начале)
+    left = [quota for _, quota, _ in buckets]
     for limited in (True, False):
         progress = True
         while progress and len(picked) < CLOUD_SIZE:
             progress = False
-            for why, _, tracks in buckets:
-                if len(picked) >= CLOUD_SIZE or (limited and left[why] <= 0):
+            for i, (why, _, tracks) in enumerate(buckets):
+                if len(picked) >= CLOUD_SIZE or (limited and left[i] <= 0):
                     continue
                 if take(tracks, why):
-                    left[why] -= 1
+                    left[i] -= 1
                     progress = True
-    items = [(await db.upsert_found(f), why)
-             for f, why in picked]
+    items = [(await db.upsert_found(f), why) for f, why in picked]
     used = {why for _, why in items}
     return {"items": items, "based_on": {
+        "artists": [name for name, _ in top],
         "genre": genre if "ваш жанр" in used else None,
-        "subs": subs_pick if "подписка" in used else [],
-        "likes": liked_pick if "по лайкам" in used else [],
+        "related": top[0][0] if top and "похожее" in used else None,
     }}
 
 

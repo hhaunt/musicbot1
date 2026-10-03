@@ -682,10 +682,10 @@ function renderCloud() {
       h('button', {class: 'pill inv', onclick: () => playQueue(list, 0)}, 'Слушать')),
     h('div', {class: 'note'}, (() => {
       const b = c.based_on || {}, parts = [];
-      if (b.genre) parts.push('жанр «' + b.genre + '»');
-      if ((b.subs || []).length) parts.push('подписки: ' + b.subs.join(', '));
-      if ((b.likes || []).length) parts.push('лайки: ' + b.likes.join(', '));
-      return parts.length ? 'Собрано из: ' + parts.join(' · ') : 'Подборка по вашему вкусу';
+      if ((b.artists || []).length) parts.push('чаще всего вы слушаете ' + b.artists.join(', '));
+      if (b.genre) parts.push('любимый жанр «' + b.genre + '»');
+      if (b.related) parts.push('немного похожего на ' + b.related);
+      return parts.length ? parts.join(' · ').replace(/^./, s => s.toUpperCase()) : 'Подборка по вашему вкусу';
     })()),
     ...list.map((t, i) => trackRow(t, i, list)),
   ], list.length);
