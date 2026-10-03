@@ -22,7 +22,8 @@ WEBAPP_PORT = int(os.getenv("WEBAPP_PORT") or os.getenv("PORT") or 8080)
 # Где хранить базу. По умолчанию — рядом с кодом, но при пересборке из GitHub эта папка
 # создаётся заново и база пропадает. Укажите DATA_DIR на постоянный диск хостинга (Volume),
 # например DATA_DIR=/data, — тогда лайки, плейлисты и статистика переживут обновления.
-DATA_DIR = Path(os.getenv("DATA_DIR") or BASE_DIR)
+# Без переменной на Bothost всё равно берём их постоянную папку /app/data, если она есть.
+DATA_DIR = Path(os.getenv("DATA_DIR") or ("/app/data" if Path("/app/data").is_dir() else BASE_DIR))
 DB_PATH = DATA_DIR / "mono.db"
 TMP_DIR = BASE_DIR / "tmp"
 CACHE_DIR = BASE_DIR / "cache"     # аудио для мини-приложения
