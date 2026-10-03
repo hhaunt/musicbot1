@@ -3,6 +3,7 @@ import html
 import logging
 import shutil
 import sys
+from pathlib import Path
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
@@ -164,6 +165,13 @@ async def send_track(msg: Message, user_id: int, tid: int, ctx: str) -> bool:
     if not t:
         return False
     markup = kb.player(tid, ctx, await db.is_fav(user_id, tid))
+    if t["url"].startswith(UPLOAD_PREFIX):
+        # загруженный слушателем файл есть только в Telegram — пересылаем его, ссылку не трогаем
+        try:
+            await msg.answer_audio(t["file_id"], reply_markup=markup)
+        except TelegramBadRequest:
+            await msg.answer_document(t["file_id"], reply_markup=markup)
+        return True
     if t["file_id"]:
         try:
             await msg.answer_audio(t["file_id"], reply_markup=markup)
@@ -173,7 +181,7 @@ async def send_track(msg: Message, user_id: int, tid: int, ctx: str) -> bool:
 
     await msg.bot.send_chat_action(msg.chat.id, "upload_document")
     try:
-        path = await music.download(t["url"])
+        path = await music.download(t["url"], f"{t['artist']} - {t['title']}")
     except Exception as e:
         log.warning("download failed for %s: %s", t["url"], e)
         reason = ("трек защищён правообладателем и недоступен для загрузки"
@@ -197,6 +205,43 @@ async def send_track(msg: Message, user_id: int, tid: int, ctx: str) -> bool:
     finally:
         path.unlink(missing_ok=True)
     return True
+
+
+# ── свои треки: аудиофайлы (в том числе FLAC), присланные боту ───────────
+
+UPLOAD_PREFIX = "tg:"  # url таких треков: tg:<уникальный id файла в Telegram>.<расширение>
+AUDIO_EXT = {".mp3", ".flac", ".m4a", ".ogg", ".opus", ".wav", ".aac"}
+UPLOAD_STREAM_LIMIT = 20 * 1024 * 1024  # больше Bot API не даёт боту скачать файл
+
+
+def _is_audio_document(msg: Message) -> bool:
+    d = msg.document
+    if not d:
+        return False
+    name = (d.file_name or "").lower()
+    return (d.mime_type or "").startswith("audio/") or any(name.endswith(e) for e in AUDIO_EXT)
+
+
+@router.message(F.audio | F.func(_is_audio_document))
+async def on_audio_upload(msg: Message):
+    """Сохраняет присланный файл как трек и сразу ставит ему лайк, чтобы он был в «Лайках»."""
+    media = msg.audio or msg.document
+    name = getattr(media, "file_name", None) or ""
+    ext = (Path(name).suffix.lower() if name else "") or (
+        ".flac" if "flac" in (media.mime_type or "") else ".mp3")
+    stem = Path(name).stem if name else "Без названия"
+    title = (getattr(media, "title", None) or stem)[:120]
+    artist = (getattr(media, "performer", None) or "")[:120]
+    tid = await db.upsert_track(f"{UPLOAD_PREFIX}{media.file_unique_id}{ext}", title, artist,
+                                int(getattr(media, "duration", None) or 0))
+    await db.set_file_id(tid, media.file_id)
+    if not await db.is_fav(msg.from_user.id, tid):
+        await db.toggle_fav(msg.from_user.id, tid)
+    note = ""
+    if (media.file_size or 0) > UPLOAD_STREAM_LIMIT:
+        note = ("\nФайл больше 20 МБ: в чате он работает, а в мини-приложении Telegram "
+                "не даст боту его прочитать — сожмите файл, если нужен там.")
+    await msg.answer(f"♥︎  «{html.escape(title)}» добавлен в лайки.{note}")
 
 
 # ── команды и текст ──────────────────────────────────────────────────────

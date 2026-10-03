@@ -154,6 +154,15 @@ main::-webkit-scrollbar{display:none}
 .bars i:nth-child(2){animation-delay:-.4s}.bars i:nth-child(3){animation-delay:-.7s}
 body.playing .bars i{animation-play-state:running}
 .row.on .bars{display:flex}.row.on .side{display:none}
+/* значок «играет» поверх обложки текущего трека */
+.cbars{position:absolute;top:0;right:0;bottom:0;left:0;display:none;align-items:center;justify-content:center;gap:3px;
+  background:rgba(0,0,0,.55);z-index:1}
+.cbars i{width:3px;height:18px;background:#fff;border-radius:1px;animation:bar 1s ease-in-out infinite;animation-play-state:paused}
+.cbars i:nth-child(2){animation-delay:-.4s}.cbars i:nth-child(3){animation-delay:-.7s}
+body.playing .cbars i{animation-play-state:running}
+.row.on .cbars{display:flex}
+.rel.artist{text-align:center}
+.rel.artist .ava.big{width:96px;height:96px;margin:0 auto 8px;font-size:32px}
 .empty{text-align:center;color:var(--dim);padding:70px 20px;animation:fade .6s var(--ease)}
 .empty div{font-size:54px;color:var(--fg);margin-bottom:14px;font-weight:200}
 .skel{height:48px;margin:11px 0 22px;background:linear-gradient(90deg,var(--card) 25%,var(--soft) 50%,var(--card) 75%);
@@ -350,7 +359,6 @@ body.open-sheet #shade{opacity:1;pointer-events:auto}
   <nav>
     <button data-tab="cloud" class="on">Облако</button>
     <button data-tab="search">Поиск</button>
-    <button data-tab="albums">Альбомы</button>
     <button data-tab="fav">Лайки</button>
     <button data-tab="pls">Плейлисты</button>
   </nav>
@@ -528,7 +536,7 @@ function trackStats(t) {
 function trackRow(t, i, list, onRemove) {
   const row = h('div', {class: 'row', 'data-id': t.id, style: `animation-delay:${Math.min(i, 14) * 35}ms`,
                         onclick: () => { tap(); playQueue(list, i); }},
-    cover(t),
+    (() => { const c = cover(t); c.append(h('div', {class: 'cbars'}, h('i'), h('i'), h('i'))); return c; })(),
     h('div', {class: 'meta'}, h('b', {}, t.title), h('small', {}, (t.artist || '—') + (t.why ? ' · ' + t.why : '') + trackStats(t))),
     h('div', {class: 'bars'}, h('i'), h('i'), h('i')),
     h('span', {class: 'side'}, t.duration ? fmt(t.duration) : ''));
@@ -549,7 +557,7 @@ async function render() {
   const my = ++seq, tab = S.tab;
   $('#title').textContent = TITLES[tab];
   $('#searchform').hidden = !(tab === 'search' || (tab === 'albums' && !S.album));
-  $('#q').placeholder = tab === 'albums' ? 'Альбом или исполнитель' : 'Трек или исполнитель';
+  $('#q').placeholder = tab === 'albums' ? 'Альбом или исполнитель' : 'Трек, исполнитель, альбом, плейлист';
   document.querySelectorAll('nav button').forEach(b => b.classList.toggle('on', b.dataset.tab === tab));
   try {
     if (S.page) return await renderPage(my);
@@ -575,15 +583,32 @@ async function render() {
             h('div', {class: 'genres'}, S.genres.map((g, i) => h('button', {class: 'genre', style: `animation-delay:${Math.min(i, 16) * 30}ms`,
               onclick: () => openPage({type: 'genre', id: g.id, name: g.name})}, g.name)))] : [])]);
       }
-      if (!S.results.length) return show(empty('∅', 'Ничего не найдено'));
-      // фильтр результатов: как нашлось, самые популярные или самые новые
+      const f = S.found || {};
+      const artists = f.artists || [], albums = f.albums || [], pls = f.playlists || [];
+      if (!S.results.length && !artists.length && !albums.length && !pls.length) return show(empty('∅', 'Ничего не найдено'));
+      // общий поиск: сначала исполнители, альбомы и плейлисты лентами, потом треки
+      const ribbon = (label, items, card) => items.length
+        ? [h('div', {class: 'label'}, label), h('div', {class: 'hscroll'}, items.map(card))] : [];
+      const sections = [
+        ...ribbon('ИСПОЛНИТЕЛИ', artists, (a, i) => h('div', {class: 'rel artist', style: `animation-delay:${Math.min(i, 8) * 45}ms`,
+            onclick: () => openPage({type: 'artist', name: a.name})},
+          person({name: a.name, photo: a.picture}, 'big'), h('b', {}, a.name),
+          h('small', {}, a.fans != null ? fmtNum(a.fans) + ' подписчиков' : 'исполнитель'))),
+        ...ribbon('АЛЬБОМЫ', albums, (a, i) => h('div', {class: 'rel', style: `animation-delay:${Math.min(i, 8) * 45}ms`,
+            onclick: () => openPage({type: 'album', id: a.id})}, cover(a), h('b', {}, a.title), h('small', {}, a.artist || '—'))),
+        ...ribbon('ПЛЕЙЛИСТЫ', pls, (x, i) => h('div', {class: 'rel', style: `animation-delay:${Math.min(i, 8) * 45}ms`,
+            onclick: () => openPage({type: 'pubpl', id: x.id})}, cover(x), h('b', {}, x.title), h('small', {}, x.count + ' треков'))),
+      ];
+      // фильтр треков: как нашлось, самые популярные или самые новые
       const sort = S.searchSort || 'all';
       const list = sort === 'popular' ? S.results.slice().sort((a, b) => (b.plays || 0) - (a.plays || 0))
         : sort === 'new' ? S.results.slice().sort((a, b) => (b.released || '').localeCompare(a.released || ''))
         : S.results;
       const sortBtn = (key, label) => h('button', {class: 'pill' + (sort === key ? ' inv' : ''),
         onclick: () => { tap(); S.searchSort = key; render(); }}, label);
-      show([h('div', {class: 'pillrow', style: 'padding-top:4px'}, sortBtn('all', 'Все'), sortBtn('popular', 'Популярные'), sortBtn('new', 'Новые')),
+      show([...sections,
+        list.length ? h('div', {class: 'label'}, 'ТРЕКИ') : null,
+        list.length ? h('div', {class: 'pillrow', style: 'padding-top:0'}, sortBtn('all', 'Все'), sortBtn('popular', 'Популярные'), sortBtn('new', 'Новые')) : null,
         ...list.map((t, i) => trackRow(t, i, list))], list.length);
     } else if (tab === 'albums') {
       if (S.album) return renderAlbum();
@@ -719,8 +744,11 @@ $('#searchform').addEventListener('submit', async e => {
   if (S.page) { S.page.q = q; return render(); }  // поиск по людям
   const my = ++seq, tab = S.tab; show(skeleton());
   try {
-    const data = await api((tab === 'albums' ? 'albums' : 'search') + '?q=' + encodeURIComponent(q));
-    if (tab === 'albums') S.albumList = data; else S.results = data;
+    if (tab === 'albums') S.albumList = await api('albums?q=' + encodeURIComponent(q));
+    else {  // общий поиск: исполнители, альбомы, плейлисты и треки разом
+      const data = await api('search/all?q=' + encodeURIComponent(q));
+      S.found = data; S.results = data.tracks;
+    }
   } catch (err) { toast('Ошибка поиска'); }
   if (my === seq) render();
 });
@@ -889,8 +917,19 @@ function load() {
   api('play/' + S.cur.id, {method: 'POST'}).catch(() => {});
   updateNow();
 }
-function step(d) {
+/* Очередь не кончается: на последнем треке подгружаем новую подборку по вкусу и играем дальше.
+   Если подобрать нечего (ещё нет лайков и подписок) — начинаем очередь сначала, как раньше. */
+let loadingMore = false;
+async function step(d) {
   if (!S.queue.length) return;
+  if (d > 0 && S.idx >= S.queue.length - 1 && !loadingMore) {
+    loadingMore = true;
+    try {
+      const more = await api('cloud/more?exclude=' + S.queue.slice(-150).map(t => t.id).join(','));
+      if (more.length) { S.queue.push(...more); toast('Дальше — треки по вашему вкусу'); }
+    } catch (e) {}
+    loadingMore = false;
+  }
   S.idx = (S.idx + d + S.queue.length) % S.queue.length; load();
 }
 function toggle() {
@@ -1453,8 +1492,9 @@ async function renderPage(my) {
     h('div', {class: 'sub'}, back(), h('span', {class: 'grow'}), ...(isUser && data.id === S.me.uid ? [] : bar)),
     isUser ? h('div', {class: 'pf'}, person(data, 'big'))
       : h('div', {class: 'pf'}, person({name: data.name, photo: data.picture}, 'big'),
-          data.fans != null ? h('div', {class: 'hours', style: 'padding:0'},
-            h('b', {style: 'font-size:34px'}, fmtNum(data.fans)), h('small', {}, 'подписчиков на Deezer')) : null),
+          // подписчики на разных площадках — только там, где исполнитель нашёлся
+          (data.platforms || []).length ? h('div', {class: 'stats', style: 'border-top:0;margin-top:6px'},
+            data.platforms.map(x => stat(fmtNum(x.count), x.platform))) : null),
     counter,
     isUser ? null : h('div', {class: 'pillrow', style: 'padding-top:4px'}, sortBtn('popular', 'Популярные'), sortBtn('new', 'Новые')),
     data.tracks.length ? h('div', {class: 'sub'}, h('span', {class: 'grow note', style: 'padding:0'},

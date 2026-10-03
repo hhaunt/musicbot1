@@ -3,6 +3,8 @@ import asyncio
 import random
 import re
 import shutil
+import subprocess
+import time
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from itertools import zip_longest
@@ -13,7 +15,8 @@ import aiohttp
 from yt_dlp import YoutubeDL
 
 from config import (MAX_DOWNLOADS, MAX_FILE_SIZE, RELEASE_COUNTRIES, RELEASE_FRESH_DAYS,
-                    RELEASE_WORLD, SEARCH_SOURCE, TMP_DIR)
+                    RELEASE_WORLD, SEARCH_SOURCE, SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET,
+                    TMP_DIR, YANDEX_MUSIC_TOKEN)
 
 DEEZER = "https://api.deezer.com"
 # Трек альбома не имеет ссылки: при загрузке он ищется по «исполнитель - название»
@@ -122,6 +125,16 @@ async def import_playlist(url: str) -> tuple[str, list[Found]]:
     if parts.scheme not in ("http", "https") or \
             not any(host == h or host.endswith("." + h) for h in IMPORT_HOSTS):
         raise ImportError_("Поддерживаются ссылки YouTube, SoundCloud, Bandcamp и Deezer")
+    if host == "on.soundcloud.com":  # короткая ссылка из приложения SoundCloud — раскрываем её
+        try:
+            async with aiohttp.ClientSession(timeout=_TIMEOUT) as s, \
+                    s.get(url.strip(), allow_redirects=True) as r:
+                url = str(r.url)
+        except aiohttp.ClientError as e:
+            raise ImportError_("Не удалось открыть ссылку SoundCloud") from e
+        host = (urlparse(url).hostname or "").lower()
+        if not (host == "soundcloud.com" or host.endswith(".soundcloud.com")):
+            raise ImportError_("Короткая ссылка ведёт не на SoundCloud")
     if host.endswith("deezer.com"):
         found = re.search(r"/playlist/(\d+)", parts.path)
         if not found:
@@ -139,9 +152,14 @@ async def import_playlist(url: str) -> tuple[str, list[Found]]:
     return title[:40], tracks[:IMPORT_LIMIT]
 
 
-def _download(url: str) -> Path:
+# Форматы, которые без перекодирования играют и Telegram, и браузеры. FLAC оставляем как есть:
+# перекодировать его в mp3 значит потерять качество, ради которого его и выбирают.
+PLAYABLE = {"mp3", "m4a", "flac"}
+
+
+def _fetch(url: str) -> Path:
+    """Скачивает один трек по ссылке. TrackProtected — если площадка закрыла его DRM."""
     TMP_DIR.mkdir(exist_ok=True)
-    has_ffmpeg = shutil.which("ffmpeg") is not None
     opts = {
         "quiet": True,
         "no_warnings": True,
@@ -149,16 +167,9 @@ def _download(url: str) -> Path:
         "noplaylist": True,
         "max_filesize": MAX_FILE_SIZE,
         "outtmpl": str(TMP_DIR / "%(id)s.%(ext)s"),
-        # без ffmpeg берём то, что Telegram проигрывает как есть (mp3 / m4a)
-        "format": "bestaudio/best" if has_ffmpeg
-        else "bestaudio[ext=mp3]/bestaudio[ext=m4a]/bestaudio[protocol^=http]/bestaudio/best",
+        # сначала без потерь, затем то, что играет везде, и уже потом что угодно
+        "format": "bestaudio[acodec=flac]/bestaudio[ext=mp3]/bestaudio[ext=m4a]/bestaudio/best",
     }
-    if has_ffmpeg:
-        opts["postprocessors"] = [
-            {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}
-        ]
-    if url.startswith(SEARCH_PREFIX):
-        url = f"{SEARCH_SOURCE}1:{url[len(SEARCH_PREFIX):]}"
     try:
         with YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=True)
@@ -166,19 +177,63 @@ def _download(url: str) -> Path:
         if "DRM" in str(e):
             raise TrackProtected("трек защищён правообладателем") from e
         raise
-    if info.get("entries") is not None:  # результат поиска — берём первый трек
-        entries = [e for e in info["entries"] if e]
-        if not entries:
-            raise RuntimeError("трек не найден")
-        info = entries[0]
-    downloads = info.get("requested_downloads") or []
+    downloads = (info or {}).get("requested_downloads") or []
     path = Path(downloads[0]["filepath"]) if downloads else None
     if not path or not path.exists():
         raise RuntimeError("файл не загружен (возможно, он больше 50 МБ)")
+    if path.suffix.lstrip(".").lower() not in PLAYABLE and shutil.which("ffmpeg"):
+        path = _to_mp3(path)  # opus, webm и т. п. — в mp3, чтобы играло на iPhone
     if path.stat().st_size > MAX_FILE_SIZE:
         path.unlink(missing_ok=True)
         raise RuntimeError("файл больше 50 МБ")
     return path
+
+
+def _to_mp3(src: Path) -> Path:
+    dst = src.with_suffix(".mp3")
+    result = subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(src), "-vn",
+                             "-b:a", "192k", str(dst)], capture_output=True, timeout=300)
+    if result.returncode != 0 or not dst.exists():
+        return src  # не вышло — отдадим как есть
+    src.unlink(missing_ok=True)
+    return dst
+
+
+def _download(url: str, hint: str = "") -> Path:
+    """Скачивает трек. Если он закрыт DRM или недоступен, ищет тот же трек в другой загрузке
+    («исполнитель - название») — в основном источнике, а затем на YouTube."""
+    query = url[len(SEARCH_PREFIX):] if url.startswith(SEARCH_PREFIX) else hint
+    candidates = [] if url.startswith(SEARCH_PREFIX) else [url]
+    sources = [SEARCH_SOURCE] + (["ytsearch"] if SEARCH_SOURCE != "ytsearch" else [])
+    last_error: Exception = RuntimeError("трек не найден")
+    tried: set[str] = set()
+
+    def attempt(link: str) -> Path | None:
+        nonlocal last_error
+        if link in tried:
+            return None
+        tried.add(link)
+        try:
+            return _fetch(link)
+        except Exception as e:
+            last_error = e
+            return None
+
+    for link in candidates:
+        if (path := attempt(link)):
+            return path
+    if query:
+        for source in sources:
+            try:
+                with YoutubeDL({"quiet": True, "no_warnings": True, "extract_flat": True,
+                                "skip_download": True}) as ydl:
+                    info = ydl.extract_info(f"{source}5:{query}", download=False) or {}
+            except Exception:
+                continue
+            for f in map(_entry, info.get("entries") or []):
+                if f and (path := attempt(f.url)):
+                    return path
+    raise last_error
 
 
 async def search(query: str, limit: int = 8) -> list[Found]:
@@ -188,9 +243,10 @@ async def search(query: str, limit: int = 8) -> list[Found]:
 _downloads = asyncio.Semaphore(MAX_DOWNLOADS)
 
 
-async def download(url: str) -> Path:
+async def download(url: str, hint: str = "") -> Path:
+    """hint — «исполнитель - название», чтобы найти замену, если по ссылке трек недоступен."""
     async with _downloads:
-        return await asyncio.to_thread(_download, url)
+        return await asyncio.to_thread(_download, url, hint)
 
 
 # ── обложки ──────────────────────────────────────────────────────────────
@@ -304,15 +360,125 @@ async def artist_top(name: str, limit: int = 5) -> list[Found]:
     return await search(name, limit)
 
 
+async def search_artists(query: str, limit: int = 8) -> list[dict]:
+    """Исполнители для общего поиска: имя, фото и подписчики на Deezer."""
+    data = (await _deezer("search/artist", q=query, limit=limit)).get("data") or []
+    return [{"name": a.get("name") or "", "picture": a.get("picture_medium") or None,
+             "fans": a.get("nb_fan")} for a in data if a.get("name")]
+
+
+# ── подписчики исполнителя на разных площадках ───────────────────────────
+# Везде берём только исполнителя с точно таким же именем — иначе покажем чужие цифры.
+
+_sc_client_id: str | None = None
+
+
+async def _soundcloud_client_id(s: aiohttp.ClientSession) -> str | None:
+    """Открытый ключ веб-версии SoundCloud: его же сайт подставляет в свои запросы."""
+    global _sc_client_id
+    if _sc_client_id:
+        return _sc_client_id
+    async with s.get("https://soundcloud.com/") as r:
+        page = await r.text()
+    scripts = re.findall(r'<script crossorigin src="(https://a-v2\.sndcdn\.com/assets/[^"]+\.js)"', page)
+    for src in reversed(scripts):
+        async with s.get(src) as r:
+            found = re.search(r'client_id\s*:\s*"([0-9a-zA-Z]{32})"', await r.text())
+        if found:
+            _sc_client_id = found.group(1)
+            return _sc_client_id
+    return None
+
+
+async def _soundcloud_followers(s: aiohttp.ClientSession, name: str) -> int | None:
+    global _sc_client_id
+    client_id = await _soundcloud_client_id(s)
+    if not client_id:
+        return None
+    async with s.get("https://api-v2.soundcloud.com/search/users",
+                     params={"q": name, "limit": 10, "client_id": client_id}) as r:
+        if r.status in (401, 403):  # ключ устарел — в следующий раз найдём новый
+            _sc_client_id = None
+            return None
+        data = await r.json(content_type=None)
+    counts = [u.get("followers_count") or 0 for u in (data or {}).get("collection") or []
+              if (u.get("username") or "").casefold() == name.casefold()]
+    return max(counts) if counts else None
+
+
+async def _yandex_followers(s: aiohttp.ClientSession, name: str) -> int | None:
+    """Сколько людей добавили исполнителя в «Мне нравится» на Яндекс Музыке."""
+    headers = {"Authorization": f"OAuth {YANDEX_MUSIC_TOKEN}"} if YANDEX_MUSIC_TOKEN else {}
+    async with s.get("https://api.music.yandex.net/search", headers=headers,
+                     params={"text": name, "type": "artist", "page": 0}) as r:
+        data = await r.json(content_type=None) if r.status == 200 else {}
+    results = (((data or {}).get("result") or {}).get("artists") or {}).get("results") or []
+    match = next((a for a in results if (a.get("name") or "").casefold() == name.casefold()), None)
+    if not match:
+        return None
+    async with s.get(f"https://api.music.yandex.net/artists/{match['id']}/brief-info",
+                     headers=headers) as r:
+        info = await r.json(content_type=None) if r.status == 200 else {}
+    return (((info or {}).get("result") or {}).get("artist") or {}).get("likesCount")
+
+
+_spotify_token: tuple[float, str | None] = (0.0, None)
+
+
+async def _spotify_followers(s: aiohttp.ClientSession, name: str) -> int | None:
+    """Spotify отдаёт данные только приложениям с ключами — без SPOTIFY_CLIENT_ID пропускаем."""
+    global _spotify_token
+    if not (SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET):
+        return None
+    if time.time() >= _spotify_token[0]:
+        async with s.post("https://accounts.spotify.com/api/token",
+                          data={"grant_type": "client_credentials"},
+                          auth=aiohttp.BasicAuth(SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET)) as r:
+            token = await r.json(content_type=None) if r.status == 200 else {}
+        if not token.get("access_token"):
+            return None
+        _spotify_token = (time.time() + int(token.get("expires_in") or 3600) - 60, token["access_token"])
+    async with s.get("https://api.spotify.com/v1/search",
+                     params={"q": name, "type": "artist", "limit": 10},
+                     headers={"Authorization": f"Bearer {_spotify_token[1]}"}) as r:
+        data = await r.json(content_type=None) if r.status == 200 else {}
+    counts = [(a.get("followers") or {}).get("total") or 0
+              for a in ((data or {}).get("artists") or {}).get("items") or []
+              if (a.get("name") or "").casefold() == name.casefold()]
+    return max(counts) if counts else None
+
+
+_artist_cache: dict[str, tuple[float, dict]] = {}
+
+
 async def artist_info(name: str) -> dict:
-    """Подписчики (фанаты) исполнителя на Deezer и его фото; пусто, если Deezer его не знает."""
-    try:
-        found = await _deezer_artist(name)
-    except Exception:
-        found = None
-    if not found:
-        return {"fans": None, "picture": None}
-    return {"fans": found.get("nb_fan"), "picture": found.get("picture_medium") or None}
+    """Фото исполнителя и его подписчики на Deezer, SoundCloud, Spotify и Яндекс Музыке.
+    Площадки, где исполнитель не нашёлся или которые не ответили, просто не попадают в список."""
+    key = name.casefold()
+    if key in _artist_cache and time.time() - _artist_cache[key][0] < 6 * 3600:
+        return _artist_cache[key][1]
+
+    async def guard(coro):
+        try:
+            return await coro
+        except Exception:
+            return None
+
+    deezer = await guard(_deezer_artist(name))
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15),
+                                     headers={"User-Agent": "Mozilla/5.0 MusicCloudBot"}) as s:
+        sc, sp, ya = await asyncio.gather(guard(_soundcloud_followers(s, name)),
+                                          guard(_spotify_followers(s, name)),
+                                          guard(_yandex_followers(s, name)))
+    followers = [{"platform": p, "count": c} for p, c in
+                 (("Deezer", (deezer or {}).get("nb_fan")), ("SoundCloud", sc),
+                  ("Spotify", sp), ("Яндекс Музыка", ya)) if c is not None]
+    info = {"fans": (deezer or {}).get("nb_fan"), "picture": (deezer or {}).get("picture_medium"),
+            "followers": followers}
+    if len(_artist_cache) > 500:
+        _artist_cache.clear()
+    _artist_cache[key] = (time.time(), info)
+    return info
 
 
 async def artist_tracks(name: str, sort: str, limit: int = 25) -> list[Found]:

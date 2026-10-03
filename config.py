@@ -47,6 +47,12 @@ RELEASE_COUNTRIES = _codes("RELEASE_COUNTRIES", "ru,kz,by,ua,uz")   # СНГ
 RELEASE_WORLD = _codes("RELEASE_WORLD", "us,gb")                    # зарубежные
 RELEASE_FRESH_DAYS = int(os.getenv("RELEASE_FRESH_DAYS") or 60)
 
+# Подписчики исполнителя на других площадках. Deezer, SoundCloud и Яндекс Музыка работают
+# без ключей; Spotify отвечает только приложениям с ключами (developer.spotify.com → Create app).
+SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID", "").strip()
+SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET", "").strip()
+YANDEX_MUSIC_TOKEN = os.getenv("YANDEX_MUSIC_TOKEN", "").strip()  # необязательно
+
 # Показывать ли новых пользователей другим в разделе «Люди» без их согласия.
 # По умолчанию нет: каждый сам включает «Открытый профиль».
 PROFILES_PUBLIC_DEFAULT = os.getenv("PROFILES_PUBLIC_DEFAULT", "").strip() == "1"

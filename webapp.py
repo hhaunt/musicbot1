@@ -3,6 +3,7 @@ import asyncio
 import hashlib
 import hmac
 import logging
+import mimetypes
 import os
 import random
 import shutil
@@ -29,6 +30,11 @@ WEBHOOK_PATH = "/tg/webhook"
 # Telegram присылает этот ключ в заголовке — чужие запросы на вебхук отбрасываются
 WEBHOOK_SECRET = hashlib.sha256(("webhook:" + BOT_TOKEN).encode()).hexdigest()[:32]
 routes = web.RouteTableDef()
+# на Linux-образах эти типы часто не прописаны — без них браузер может не узнать FLAC и m4a
+mimetypes.add_type("audio/flac", ".flac")
+mimetypes.add_type("audio/mp4", ".m4a")
+mimetypes.add_type("audio/ogg", ".ogg")
+mimetypes.add_type("audio/ogg", ".opus")
 _locks: dict[int, asyncio.Lock] = {}
 _cloud_cache: dict[int, tuple[float, dict]] = {}
 _lyrics_cache: dict[int, dict] = {}
@@ -139,6 +145,7 @@ async def api_me_notify(request):
 # слушателя забирает это и показывает в профиле Discord. Сам сервер в Discord не ходит.
 
 _now_playing: dict[int, dict] = {}
+_app_bot: Bot | None = None  # нужен, чтобы скачивать из Telegram присланные слушателями файлы
 _bot_username: str | None = None
 
 
@@ -322,9 +329,10 @@ async def api_artist(request):
                                            music.artist_info(name))
     except Exception as e:
         log.warning("artist tracks failed for %r: %s", name, e)
-        found, info = [], {"fans": None, "picture": None}
+        found, info = [], {"fans": None, "picture": None, "followers": []}
     return web.json_response({"name": name, "sort": sort, "tracks": await save_tracks(uid, found),
                               "fans": info["fans"], "picture": info["picture"],
+                              "platforms": info.get("followers") or [],
                               **await social_json(uid, "artist", name)})
 
 
@@ -566,6 +574,39 @@ async def api_cloud(request):
     return web.json_response({"based_on": cached[1]["based_on"], "tracks": tracks})
 
 
+@routes.get("/api/cloud/more")
+async def api_cloud_more(request):
+    """Продолжение очереди, когда она закончилась: свежая подборка по вкусу без уже звучавшего."""
+    uid = user_id(request)
+    exclude = {int(x) for x in request.query.get("exclude", "").split(",") if x.isdigit()}
+    built = await build_cloud(uid)  # каждый раз новая: исполнители и похожие выбираются случайно
+    favs = await fav_ids(uid)
+    tracks = [{**track_json(await db.get_track(tid), favs), "why": why}
+              for tid, why in built["items"] if tid not in exclude]
+    return web.json_response(tracks)
+
+
+@routes.get("/api/search/all")
+async def api_search_all(request):
+    """Общий поиск: исполнители, альбомы, плейлисты и треки по одному запросу."""
+    uid = user_id(request)
+    query = " ".join(request.query.get("q", "").split())[:100]
+    if not query:
+        return web.json_response({"artists": [], "albums": [], "playlists": [], "tracks": []})
+    tracks, artists, albums, playlists = await asyncio.gather(
+        _safe(music.search(query, 20), "search"),
+        _safe(music.search_artists(query, 8), "artists"),
+        _safe(music.search_albums(query, 8), "albums"),
+        _safe(music.search_playlists(query, 8), "playlists"))
+    return web.json_response({
+        "artists": artists,
+        "albums": [{"id": a.id, "title": a.title, "artist": a.artist, "cover": a.cover,
+                    "count": a.count} for a in albums],
+        "playlists": playlists,
+        "tracks": await save_tracks(uid, tracks),
+    })
+
+
 @routes.get("/api/search")
 async def api_search(request):
     uid = user_id(request)
@@ -794,7 +835,13 @@ async def cached_audio(track) -> Path:
         for path in CACHE_DIR.glob(f"{track['id']}.*"):
             os.utime(path)  # отмечаем как недавно использованный
             return path
-        src = await music.download(track["url"])
+        if track["url"].startswith("tg:"):
+            # файл, который слушатель прислал боту: берём его из Telegram (Bot API — до 20 МБ)
+            dst = CACHE_DIR / f"{track['id']}{Path(track['url']).suffix or '.mp3'}"
+            await _app_bot.download(track["file_id"], destination=dst)
+            _prune_cache()
+            return dst
+        src = await music.download(track["url"], f"{track['artist']} - {track['title']}")
         dst = CACHE_DIR / f"{track['id']}{src.suffix}"
         shutil.move(src, dst)
         _prune_cache()
@@ -894,6 +941,8 @@ async def api_logo(request):
 async def start(bot: Bot, dp: Dispatcher, logo: bytes | None = None) -> web.AppRunner:
     app = web.Application()
     app["bot"] = bot
+    global _app_bot
+    _app_bot = bot
     app["logo"] = logo
     SimpleRequestHandler(dispatcher=dp, bot=bot,
                          secret_token=WEBHOOK_SECRET).register(app, path=WEBHOOK_PATH)
