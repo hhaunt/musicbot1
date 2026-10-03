@@ -120,10 +120,10 @@ INSERT OR IGNORE INTO usage SELECT id, 'app', 0, 0 FROM users;
 """
 
 
-async def init() -> None:
+async def init(path=DB_PATH) -> None:
     global _db
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _db = await aiosqlite.connect(DB_PATH)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _db = await aiosqlite.connect(path)
     _db.row_factory = aiosqlite.Row
     await _db.executescript(SCHEMA)
     # базы, созданные до появления обложек

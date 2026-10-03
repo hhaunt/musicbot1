@@ -20,7 +20,8 @@ import keyboards as kb
 import music
 import releases
 import webapp
-from config import ADMIN_IDS, BOT_TOKEN, BRAND, MAX_PLAYLISTS, PAGE_SIZE, TMP_DIR, WEBAPP_URL
+from config import (ADMIN_IDS, BASE_DIR, BOT_TOKEN, BRAND, DB_PATH, MAX_PLAYLISTS, PAGE_SIZE,
+                    TMP_DIR, WEBAPP_URL)
 
 log = logging.getLogger("mono")
 router = Router()
@@ -492,6 +493,8 @@ async def keep_webhook(bot: Bot, dp: Dispatcher) -> None:
                                       drop_pending_updates=first,
                                       allowed_updates=dp.resolve_used_update_types())
                 log.info("webhook set to %s", url)
+            elif first:
+                log.info("webhook ok: %s", url)
         except Exception as e:
             log.warning("не удалось проверить вебхук: %s", e)
         first = False
@@ -503,7 +506,16 @@ async def main() -> None:
     if not BOT_TOKEN:
         sys.exit("Укажите BOT_TOKEN в файле .env (см. .env.example)")
     shutil.rmtree(TMP_DIR, ignore_errors=True)  # недокачанное с прошлого запуска
-    await db.init()
+    log.info("запуск: база %s, мини-приложение %s", DB_PATH, WEBAPP_URL or "выключено")
+    try:
+        # если постоянная папка недоступна или зависает, бот всё равно должен подняться
+        await asyncio.wait_for(db.init(), 30)
+    except Exception as e:
+        fallback = BASE_DIR / "mono.db"
+        log.error("база в %s не открылась (%r) — временно использую %s; "
+                  "данные там сотрутся при обновлении", DB_PATH, e, fallback)
+        await db.init(fallback)
+    log.info("база готова")
     bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
     dp = Dispatcher()
     dp.include_router(router)
@@ -521,6 +533,7 @@ async def main() -> None:
     try:
         logo = await load_logo(bot)
         images.set_logo(logo)
+        log.info("бот @%s подключён к Telegram", (await bot.me()).username)
         watcher = asyncio.create_task(releases.watch(bot))  # noqa: F841 — держим ссылку на задачу
         if WEBAPP_URL:
             runner = await webapp.start(bot, dp, logo)
