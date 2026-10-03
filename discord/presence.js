@@ -11,17 +11,28 @@ const readline = require('readline');
 const CONFIG = path.join(__dirname, 'config.json');
 const POLL_MS = 5000;
 
+/* Вопрос на отдельной строке и ввод без «умного» редактирования строки: иначе консоль Windows
+   на длинном вставленном коде перерисовывает подсказку при каждом символе. */
+let lines = null;
 function ask(question) {
-  const rl = readline.createInterface({input: process.stdin, output: process.stdout});
-  return new Promise(resolve => rl.question(question, answer => { rl.close(); resolve(answer.trim()); }));
+  console.log(question);
+  if (!lines) {  // одна очередь строк на все вопросы: вставка может принести сразу несколько
+    const queue = [], waiting = [];
+    readline.createInterface({input: process.stdin, terminal: false}).on('line', line => {
+      line = line.trim().replace(/^["']|["']$/g, '');
+      waiting.length ? waiting.shift()(line) : queue.push(line);
+    });
+    lines = () => queue.length ? Promise.resolve(queue.shift()) : new Promise(r => waiting.push(r));
+  }
+  return lines();
 }
 
 /* config.json: код из мини-приложения и Application ID приложения в Discord */
 async function loadConfig() {
   let cfg = {};
   try { cfg = JSON.parse(fs.readFileSync(CONFIG, 'utf8')); } catch (e) {}
-  if (!cfg.code) cfg.code = await ask('Код из мини-приложения (Профиль → Discord): ');
-  if (!cfg.clientId) cfg.clientId = await ask('Application ID приложения Discord: ');
+  if (!cfg.code) cfg.code = await ask('Вставьте код из мини-приложения (Профиль → Discord) и нажмите Enter:');
+  if (!cfg.clientId) cfg.clientId = await ask('Вставьте Application ID приложения Discord и нажмите Enter:');
   let code = null;
   try { code = JSON.parse(Buffer.from(cfg.code, 'base64').toString('utf8')); } catch (e) {}
   if (!code || !code.url || !code.u || !code.k) {
