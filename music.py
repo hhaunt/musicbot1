@@ -35,6 +35,9 @@ class Found:
     duration: int
     cover: str | None = None
     genre: str | None = None
+    plays: int | None = None      # прослушивания на площадке-источнике, если она их сообщает
+    likes: int | None = None      # лайки там же
+    released: str | None = None   # дата выхода, ГГГГ-ММ-ДД
 
 
 @dataclass
@@ -76,8 +79,16 @@ def _entry(e: dict | None) -> Found | None:
         return None
     artist = e.get("uploader") or e.get("channel") or e.get("artist") or ""
     genre = e.get("genre") or next(iter(e.get("genres") or []), None)
+    released = None
+    if e.get("timestamp"):
+        released = date.fromtimestamp(int(e["timestamp"])).isoformat()
+    elif re.fullmatch(r"\d{8}", str(e.get("upload_date") or "")):
+        d = e["upload_date"]
+        released = f"{d[:4]}-{d[4:6]}-{d[6:]}"
+    count = lambda k: int(e[k]) if isinstance(e.get(k), (int, float)) else None  # noqa: E731
     return Found(url, title.strip(), artist.strip(), int(e.get("duration") or 0),
-                 _thumbnail(e), (genre or "").strip()[:40] or None)
+                 _thumbnail(e), (genre or "").strip()[:40] or None,
+                 count("view_count"), count("like_count"), released)
 
 
 # ── импорт плейлистов по ссылке ──────────────────────────────────────────
@@ -252,7 +263,9 @@ def _deezer_track(x: dict) -> Found:
     who = (x.get("artist") or {}).get("name") or ""
     title = x.get("title") or ""
     cover = (x.get("album") or {}).get("cover_medium") or None
-    return Found(f"{SEARCH_PREFIX}{who} - {title}", title, who, int(x.get("duration") or 0), cover)
+    # у Deezer нет числа прослушиваний, только рейтинг популярности — его не показываем
+    return Found(f"{SEARCH_PREFIX}{who} - {title}", title, who, int(x.get("duration") or 0), cover,
+                 released=(x.get("release_date") or None))
 
 
 async def chart(limit: int = 30) -> list[Found]:
@@ -273,14 +286,63 @@ async def _artist_picks(name: str) -> list[Found]:
     return [_deezer_track(x) for t in tops if isinstance(t, dict) for x in t.get("data") or []]
 
 
-async def artist_top(name: str, limit: int = 5) -> list[Found]:
-    """Лучшие треки самого исполнителя; если Deezer его не знает — ищем в основном источнике."""
+async def _deezer_artist(name: str) -> dict | None:
+    """Исполнитель в каталоге Deezer — только при точном совпадении имени."""
     found = (await _deezer("search/artist", q=name, limit=1)).get("data") or []
     if found and (found[0].get("name") or "").casefold() == name.casefold():
-        top = (await _deezer(f"artist/{found[0]['id']}/top", limit=limit)).get("data") or []
+        return found[0]
+    return None
+
+
+async def artist_top(name: str, limit: int = 5) -> list[Found]:
+    """Лучшие треки самого исполнителя; если Deezer его не знает — ищем в основном источнике."""
+    found = await _deezer_artist(name)
+    if found:
+        top = (await _deezer(f"artist/{found['id']}/top", limit=limit)).get("data") or []
         if top:
             return [_deezer_track(x) for x in top]
     return await search(name, limit)
+
+
+async def artist_info(name: str) -> dict:
+    """Подписчики (фанаты) исполнителя на Deezer и его фото; пусто, если Deezer его не знает."""
+    try:
+        found = await _deezer_artist(name)
+    except Exception:
+        found = None
+    if not found:
+        return {"fans": None, "picture": None}
+    return {"fans": found.get("nb_fan"), "picture": found.get("picture_medium") or None}
+
+
+async def artist_tracks(name: str, sort: str, limit: int = 25) -> list[Found]:
+    """Треки исполнителя: sort='popular' — самые популярные, 'new' — самые свежие релизы."""
+    found = await _deezer_artist(name)
+    if found and sort == "new":
+        albums = (await _deezer(f"artist/{found['id']}/albums", limit=50)).get("data") or []
+        albums = sorted((a for a in albums if a.get("id") and a.get("release_date")),
+                        key=lambda a: a["release_date"], reverse=True)
+        out: list[Found] = []
+        for a in albums[:6]:  # самые свежие релизы, пока не наберётся нужное число треков
+            data = (await _deezer(f"album/{a['id']}/tracks", limit=50)).get("data") or []
+            for x in data:
+                t = _deezer_track(x)
+                t.cover = t.cover or a.get("cover_medium")
+                t.released = a["release_date"]
+                out.append(t)
+            if len(out) >= limit:
+                break
+        if out:
+            return out[:limit]
+    elif found:  # у Deezer список /top уже упорядочен по популярности
+        top = (await _deezer(f"artist/{found['id']}/top", limit=limit)).get("data") or []
+        if top:
+            return [_deezer_track(x) for x in top]
+    # Deezer исполнителя не знает — сортируем обычный поиск по данным площадки
+    tracks = await search(name, limit)
+    if sort == "new":
+        return sorted(tracks, key=lambda t: t.released or "", reverse=True)
+    return sorted(tracks, key=lambda t: t.plays or 0, reverse=True)
 
 
 # Жанры SoundCloud и Deezer называются по-разному — сводим частые варианты к словам Deezer

@@ -132,9 +132,24 @@ async def init(path=DB_PATH) -> None:
         await _db.execute("ALTER TABLE tracks ADD COLUMN cover TEXT")
     if "genre" not in columns:  # NULL — ещё не узнавали, '' — узнать не удалось
         await _db.execute("ALTER TABLE tracks ADD COLUMN genre TEXT")
+    # прослушивания и лайки на площадке-источнике и дата выхода — для сортировки и показа
+    for col, kind in (("ext_plays", "INTEGER"), ("ext_likes", "INTEGER"), ("released", "TEXT")):
+        if col not in columns:
+            await _db.execute(f"ALTER TABLE tracks ADD COLUMN {col} {kind}")
     if "notify" not in [r["name"] for r in await _all("PRAGMA table_info(users)")]:
         await _db.execute("ALTER TABLE users ADD COLUMN notify INTEGER NOT NULL DEFAULT 1")
     await _db.executescript(BACKFILL)
+    # треки вместе с числом прослушиваний и лайков внутри MusicCloud; пересоздаём после
+    # миграций, чтобы в представление попали новые столбцы
+    await _db.executescript("""
+        CREATE INDEX IF NOT EXISTS plays_track ON plays (track_id);
+        CREATE INDEX IF NOT EXISTS favorites_track ON favorites (track_id);
+        DROP VIEW IF EXISTS track_stats;
+        CREATE VIEW track_stats AS SELECT t.*,
+            (SELECT COUNT(*) FROM plays p WHERE p.track_id = t.id) AS app_plays,
+            (SELECT COUNT(*) FROM favorites f WHERE f.track_id = t.id) AS app_likes
+            FROM tracks t;
+    """)
     await _db.commit()
 
 
@@ -192,21 +207,31 @@ async def usage_stats() -> dict:
 # ── треки ────────────────────────────────────────────────────────────────
 
 async def upsert_track(url: str, title: str, artist: str, duration: int,
-                       cover: str | None = None, genre: str | None = None) -> int:
+                       cover: str | None = None, genre: str | None = None,
+                       plays: int | None = None, likes: int | None = None,
+                       released: str | None = None) -> int:
     await _db.execute(
-        "INSERT INTO tracks (url, title, artist, duration, cover, genre) VALUES (?, ?, ?, ?, ?, ?) "
+        "INSERT INTO tracks (url, title, artist, duration, cover, genre, ext_plays, ext_likes, released) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(url) DO UPDATE SET title=excluded.title, artist=excluded.artist, "
         "duration=excluded.duration, cover=COALESCE(excluded.cover, cover), "
-        "genre=COALESCE(excluded.genre, genre)",
-        (url, title, artist, duration, cover, genre or None),
+        "genre=COALESCE(excluded.genre, genre), ext_plays=COALESCE(excluded.ext_plays, ext_plays), "
+        "ext_likes=COALESCE(excluded.ext_likes, ext_likes), released=COALESCE(excluded.released, released)",
+        (url, title, artist, duration, cover, genre or None, plays, likes, released),
     )
     await _db.commit()
     row = await _one("SELECT id FROM tracks WHERE url = ?", url)
     return row["id"]
 
 
+async def upsert_found(f) -> int:
+    """Сохраняет трек, найденный в music.py (music.Found), со всем, что о нём известно."""
+    return await upsert_track(f.url, f.title, f.artist, f.duration, f.cover, f.genre,
+                              f.plays, f.likes, f.released)
+
+
 async def get_track(track_id: int):
-    return await _one("SELECT * FROM tracks WHERE id = ?", track_id)
+    return await _one("SELECT * FROM track_stats WHERE id = ?", track_id)
 
 
 async def set_file_id(track_id: int, file_id: str | None) -> None:
@@ -227,7 +252,7 @@ async def set_last_search(user_id: int, track_ids: list[int]) -> None:
 
 async def last_search(user_id: int):
     return await _all(
-        "SELECT t.* FROM last_search s JOIN tracks t ON t.id = s.track_id "
+        "SELECT t.* FROM last_search s JOIN track_stats t ON t.id = s.track_id "
         "WHERE s.user_id = ? ORDER BY s.pos",
         user_id,
     )
@@ -248,14 +273,14 @@ async def play_count(user_id: int) -> int:
 async def taste(user_id: int) -> list[tuple[str, str, int]]:
     """(название, исполнитель, вес): избранное весит больше плейлистов и прослушиваний."""
     favs = await _all(
-        "SELECT t.title, t.artist FROM favorites f JOIN tracks t ON t.id = f.track_id "
+        "SELECT t.title, t.artist FROM favorites f JOIN track_stats t ON t.id = f.track_id "
         "WHERE f.user_id = ?", user_id)
     lists = await _all(
         "SELECT t.title, t.artist FROM playlists p "
-        "JOIN playlist_tracks pt ON pt.playlist_id = p.id JOIN tracks t ON t.id = pt.track_id "
+        "JOIN playlist_tracks pt ON pt.playlist_id = p.id JOIN track_stats t ON t.id = pt.track_id "
         "WHERE p.user_id = ?", user_id)
     plays = await _all(
-        "SELECT t.title, t.artist FROM plays p JOIN tracks t ON t.id = p.track_id "
+        "SELECT t.title, t.artist FROM plays p JOIN track_stats t ON t.id = p.track_id "
         "WHERE p.user_id = ? ORDER BY p.id DESC LIMIT 200", user_id)
     return ([(r["title"], r["artist"], 3) for r in favs]
             + [(r["title"], r["artist"], 2) for r in lists]
@@ -265,7 +290,7 @@ async def taste(user_id: int) -> list[tuple[str, str, int]]:
 async def history(user_id: int, limit: int = 50):
     """Недавно прослушанные треки без повторов, свежие сверху."""
     return await _all(
-        "SELECT t.* FROM tracks t JOIN (SELECT track_id, MAX(id) AS last FROM plays "
+        "SELECT t.* FROM track_stats t JOIN (SELECT track_id, MAX(id) AS last FROM plays "
         "WHERE user_id = ? GROUP BY track_id) p ON p.track_id = t.id "
         "ORDER BY p.last DESC LIMIT ?", user_id, limit)
 
@@ -283,7 +308,7 @@ async def add_listen(user_id: int, track_id: int, seconds: int) -> None:
 async def listen_rows(user_id: int):
     return await _all(
         "SELECT t.id, t.title, t.artist, t.genre, l.seconds FROM listen_time l "
-        "JOIN tracks t ON t.id = l.track_id WHERE l.user_id = ? ORDER BY l.seconds DESC", user_id)
+        "JOIN track_stats t ON t.id = l.track_id WHERE l.user_id = ? ORDER BY l.seconds DESC", user_id)
 
 
 async def listen_total(user_id: int) -> int:
@@ -453,7 +478,7 @@ async def get_album(album_id: int):
 
 async def album_tracks(album_id: int):
     return await _all(
-        "SELECT t.* FROM album_tracks a JOIN tracks t ON t.id = a.track_id "
+        "SELECT t.* FROM album_tracks a JOIN track_stats t ON t.id = a.track_id "
         "WHERE a.album_id = ? ORDER BY a.pos",
         album_id,
     )
@@ -485,7 +510,7 @@ async def toggle_fav(user_id: int, track_id: int) -> bool:
 
 async def favorites(user_id: int):
     return await _all(
-        "SELECT t.* FROM favorites f JOIN tracks t ON t.id = f.track_id "
+        "SELECT t.* FROM favorites f JOIN track_stats t ON t.id = f.track_id "
         "WHERE f.user_id = ? ORDER BY f.added DESC, f.rowid DESC",
         user_id,
     )
@@ -518,7 +543,7 @@ async def get_playlist(playlist_id: int, user_id: int):
 
 async def playlist_tracks(playlist_id: int):
     return await _all(
-        "SELECT t.* FROM playlist_tracks pt JOIN tracks t ON t.id = pt.track_id "
+        "SELECT t.* FROM playlist_tracks pt JOIN track_stats t ON t.id = pt.track_id "
         "WHERE pt.playlist_id = ? ORDER BY pt.id",
         playlist_id,
     )

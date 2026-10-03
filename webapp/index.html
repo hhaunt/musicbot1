@@ -474,6 +474,12 @@ function h(tag, attrs, ...kids) {
   return e;
 }
 const fmt = s => { s = Math.max(0, Math.floor(s || 0)); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); };
+/* 1234 → «1,2 тыс», 2500000 → «2,5 млн» */
+const fmtNum = n => {
+  n = Number(n) || 0;
+  const short = (v, unit) => (v >= 100 ? Math.round(v) : Math.round(v * 10) / 10).toString().replace('.', ',') + ' ' + unit;
+  return n < 1000 ? String(n) : n < 1e6 ? short(n / 1e3, 'тыс') : short(n / 1e6, 'млн');
+};
 const fmtTime = s => s < 3600 ? Math.round(s / 60) + ' мин' : (s / 3600).toFixed(1).replace('.', ',') + ' ч';
 const tap = () => { try { tg.HapticFeedback.impactOccurred('light'); } catch (e) {} };
 let toastTimer;
@@ -512,11 +518,18 @@ function cover(item, into) {
 /* ── экраны ── */
 function skeleton() { return Array.from({length: 7}, () => h('div', {class: 'skel'})); }
 function empty(glyph, text) { return h('div', {class: 'empty'}, h('div', {}, glyph), text); }
+/* « · ▶ 1,2 млн · ♥ 340»: с площадки-источника, а где она не сообщает — внутри MusicCloud */
+function trackStats(t) {
+  const parts = [];
+  if (t.plays) parts.push('▶ ' + fmtNum(t.plays));
+  if (t.likes) parts.push('♡ ' + fmtNum(t.likes));
+  return parts.length ? ' · ' + parts.join(' · ') : '';
+}
 function trackRow(t, i, list, onRemove) {
   const row = h('div', {class: 'row', 'data-id': t.id, style: `animation-delay:${Math.min(i, 14) * 35}ms`,
                         onclick: () => { tap(); playQueue(list, i); }},
     cover(t),
-    h('div', {class: 'meta'}, h('b', {}, t.title), h('small', {}, (t.artist || '—') + (t.why ? ' · ' + t.why : ''))),
+    h('div', {class: 'meta'}, h('b', {}, t.title), h('small', {}, (t.artist || '—') + (t.why ? ' · ' + t.why : '') + trackStats(t))),
     h('div', {class: 'bars'}, h('i'), h('i'), h('i')),
     h('span', {class: 'side'}, t.duration ? fmt(t.duration) : ''));
   if (onRemove) row.append(h('button', {class: 'x', 'aria-label': 'Убрать', onclick: e => { e.stopPropagation(); onRemove(t); }}, '✕'));
@@ -563,7 +576,15 @@ async function render() {
               onclick: () => openPage({type: 'genre', id: g.id, name: g.name})}, g.name)))] : [])]);
       }
       if (!S.results.length) return show(empty('∅', 'Ничего не найдено'));
-      show(S.results.map((t, i) => trackRow(t, i, S.results)), S.results.length);
+      // фильтр результатов: как нашлось, самые популярные или самые новые
+      const sort = S.searchSort || 'all';
+      const list = sort === 'popular' ? S.results.slice().sort((a, b) => (b.plays || 0) - (a.plays || 0))
+        : sort === 'new' ? S.results.slice().sort((a, b) => (b.released || '').localeCompare(a.released || ''))
+        : S.results;
+      const sortBtn = (key, label) => h('button', {class: 'pill' + (sort === key ? ' inv' : ''),
+        onclick: () => { tap(); S.searchSort = key; render(); }}, label);
+      show([h('div', {class: 'pillrow', style: 'padding-top:4px'}, sortBtn('all', 'Все'), sortBtn('popular', 'Популярные'), sortBtn('new', 'Новые')),
+        ...list.map((t, i) => trackRow(t, i, list))], list.length);
     } else if (tab === 'albums') {
       if (S.album) return renderAlbum();
       if (!S.albumList) return show(empty('◎', 'Найдите альбом по названию или исполнителю'));
@@ -1265,7 +1286,7 @@ function socialBar(kind, target, data, counter) {
     follow.className = 'pill' + (data.following ? '' : ' inv');
     follow.textContent = data.following ? 'Вы подписаны' : 'Подписаться';
     like.textContent = (data.liked ? HEART : '♡') + ' ' + data.likes;
-    counter.textContent = `${data.followers} подписчиков · ${data.likes} лайков`;
+    counter.textContent = `В MusicCloud: ${data.followers} подписчиков · ${data.likes} лайков`;
   };
   const send = async rel => {
     tap();
@@ -1418,18 +1439,26 @@ async function renderPage(my) {
   const isUser = p.type === 'user';
   $('#title').textContent = isUser ? 'Слушатель' : p.name;
   show([h('div', {class: 'sub'}, back()), ...skeleton()]);
+  p.sort = p.sort || 'popular';  // у исполнителя: самые популярные или самые новые треки
   let data;
-  try { data = await api(isUser ? 'user/' + p.id : 'artist?name=' + encodeURIComponent(p.name)); }
+  try { data = await api(isUser ? 'user/' + p.id : `artist?name=${encodeURIComponent(p.name)}&sort=${p.sort}`); }
   catch (e) { if (my === seq) { toast(isUser ? 'Профиль закрыт или не найден' : 'Не удалось открыть исполнителя'); closePage(); } return; }
   if (my !== seq) return;
   if (isUser) $('#title').textContent = data.name;
   const counter = h('div', {class: 'note'});
   const bar = socialBar(isUser ? 'user' : 'artist', isUser ? data.id : data.name, data, counter);
+  const sortBtn = (sort, label) => h('button', {class: 'pill' + (p.sort === sort ? ' inv' : ''),
+    onclick: () => { if (p.sort !== sort) { tap(); p.sort = sort; render(); } }}, label);
   show([
     h('div', {class: 'sub'}, back(), h('span', {class: 'grow'}), ...(isUser && data.id === S.me.uid ? [] : bar)),
-    isUser ? h('div', {class: 'pf'}, person(data, 'big')) : null,
+    isUser ? h('div', {class: 'pf'}, person(data, 'big'))
+      : h('div', {class: 'pf'}, person({name: data.name, photo: data.picture}, 'big'),
+          data.fans != null ? h('div', {class: 'hours', style: 'padding:0'},
+            h('b', {style: 'font-size:34px'}, fmtNum(data.fans)), h('small', {}, 'подписчиков на Deezer')) : null),
     counter,
-    data.tracks.length ? h('div', {class: 'sub'}, h('span', {class: 'grow note', style: 'padding:0'}, isUser ? 'Лайки слушателя' : 'Треки'),
+    isUser ? null : h('div', {class: 'pillrow', style: 'padding-top:4px'}, sortBtn('popular', 'Популярные'), sortBtn('new', 'Новые')),
+    data.tracks.length ? h('div', {class: 'sub'}, h('span', {class: 'grow note', style: 'padding:0'},
+        isUser ? 'Лайки слушателя' : p.sort === 'new' ? 'Новые треки' : 'Самые популярные'),
       h('button', {class: 'pill inv', onclick: () => playQueue(data.tracks, 0)}, 'Слушать')) : null,
     ...(data.tracks.length ? data.tracks.map((t, i) => trackRow(t, i, data.tracks)) : [empty('∅', isUser ? 'Лайков пока нет' : 'Треки не найдены')]),
   ], data.tracks.length || '');

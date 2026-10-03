@@ -63,15 +63,28 @@ async def fav_ids(uid: int) -> set[int]:
 
 
 def track_json(t, favs: set[int]) -> dict:
+    keys = t.keys()
+
+    def stat(ext: str, app: str):
+        """Число с площадки-источника, а если она его не сообщает — число внутри MusicCloud."""
+        value = t[ext] if ext in keys else None
+        if value is not None:
+            return value, "ext"
+        return (t[app] if app in keys else 0), "app"
+
+    plays, plays_src = stat("ext_plays", "app_plays")
+    likes, likes_src = stat("ext_likes", "app_likes")
     return {"id": t["id"], "title": t["title"], "artist": t["artist"],
-            "duration": t["duration"], "cover": t["cover"], "fav": t["id"] in favs}
+            "duration": t["duration"], "cover": t["cover"], "fav": t["id"] in favs,
+            "plays": plays, "likes": likes, "stats_from": plays_src if plays_src == likes_src else "mixed",
+            "released": t["released"] if "released" in keys else None}
 
 
 async def ensure_album(album_id: int):
     album = await db.get_album(album_id)
     if not album:
         a = await music.get_album(album_id)
-        ids = [await db.upsert_track(t.url, t.title, t.artist, t.duration, t.cover, t.genre)
+        ids = [await db.upsert_found(t)
                for t in a.tracks]
         await db.save_album(a.id, a.title, a.artist, a.year, a.cover, ids)
         album = await db.get_album(album_id)
@@ -301,19 +314,17 @@ async def api_user(request):
 async def api_artist(request):
     uid = user_id(request)
     name = " ".join(request.query.get("name", "").split())[:100]
-    if not name:
+    sort = request.query.get("sort", "popular")
+    if not name or sort not in ("popular", "new"):
         raise web.HTTPBadRequest()
     try:
-        found = await music.search(name, 15)
+        found, info = await asyncio.gather(music.artist_tracks(name, sort, 25),
+                                           music.artist_info(name))
     except Exception as e:
-        log.warning("artist search failed for %r: %s", name, e)
-        found = []
-    favs = await fav_ids(uid)
-    tracks = []
-    for f in found:
-        tid = await db.upsert_track(f.url, f.title, f.artist, f.duration, f.cover, f.genre)
-        tracks.append(track_json(await db.get_track(tid), favs))
-    return web.json_response({"name": name, "tracks": tracks,
+        log.warning("artist tracks failed for %r: %s", name, e)
+        found, info = [], {"fans": None, "picture": None}
+    return web.json_response({"name": name, "sort": sort, "tracks": await save_tracks(uid, found),
+                              "fans": info["fans"], "picture": info["picture"],
                               **await social_json(uid, "artist", name)})
 
 
@@ -532,7 +543,7 @@ async def build_cloud(uid: int) -> dict:
                 if take(tracks, why):
                     left[why] -= 1
                     progress = True
-    items = [(await db.upsert_track(f.url, f.title, f.artist, f.duration, f.cover, f.genre), why)
+    items = [(await db.upsert_found(f), why)
              for f, why in picked]
     used = {why for _, why in items}
     return {"items": items, "based_on": {
@@ -569,7 +580,7 @@ async def api_search(request):
     favs = await fav_ids(uid)
     out = []
     for f in found:
-        tid = await db.upsert_track(f.url, f.title, f.artist, f.duration, f.cover, f.genre)
+        tid = await db.upsert_found(f)
         out.append(track_json(await db.get_track(tid), favs))
     return web.json_response(out)
 
@@ -667,7 +678,7 @@ async def api_playlist_import(request):
         return web.json_response({"error": str(e)}, status=400)
     pid = await db.create_playlist(uid, title)
     for f in tracks:
-        tid = await db.upsert_track(f.url, f.title, f.artist, f.duration, f.cover, f.genre)
+        tid = await db.upsert_found(f)
         await db.add_to_playlist(pid, tid)
     return web.json_response({"id": pid, "name": title, "count": len(tracks)})
 
@@ -702,7 +713,7 @@ async def save_tracks(uid: int, found: list) -> list[dict]:
     favs = await fav_ids(uid)
     out = []
     for f in found:
-        tid = await db.upsert_track(f.url, f.title, f.artist, f.duration, f.cover, f.genre)
+        tid = await db.upsert_found(f)
         out.append(track_json(await db.get_track(tid), favs))
     return out
 

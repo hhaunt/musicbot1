@@ -141,7 +141,7 @@ async def show_album(msg: Message, album_id: int, page: int, edit: bool) -> bool
         except Exception as e:
             log.warning("album %s failed: %s", album_id, e)
             return False
-        ids = [await db.upsert_track(t.url, t.title, t.artist, t.duration, t.cover, t.genre)
+        ids = [await db.upsert_found(t)
                for t in a.tracks]
         await db.save_album(a.id, a.title, a.artist, a.year, a.cover, ids)
         album = await db.get_album(album_id)
@@ -274,7 +274,7 @@ async def do_search(msg: Message):
         card = images.message_card("Поиск", f"По запросу «{query}» ничего не найдено.")
         await show(msg, card, "", kb.back_to_menu(), edit=False)
         return
-    ids = [await db.upsert_track(f.url, f.title, f.artist, f.duration, f.cover, f.genre)
+    ids = [await db.upsert_found(f)
            for f in found]
     await db.set_last_search(msg.from_user.id, ids)
     rows = [(f.title, f.artist or "—", images.fmt_duration(f.duration)) for f in found]
