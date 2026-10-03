@@ -22,7 +22,7 @@ import db
 import images
 import music
 from config import (ADMIN_IDS, BASE_DIR, BOT_TOKEN, BRAND, CACHE_DIR, CACHE_FILES, CACHE_MAX_MB,
-                    MAX_PLAYLISTS, PROFILES_PUBLIC_DEFAULT, WEBAPP_PORT)
+                    MAX_PLAYLISTS, PROFILES_PUBLIC_DEFAULT, WEBAPP_PORT, WEBAPP_URL)
 
 log = logging.getLogger("mono.web")
 WEBHOOK_PATH = "/tg/webhook"
@@ -162,22 +162,27 @@ async def api_presence(request):
                                                     presence_key(int(uid))):
         raise web.HTTPUnauthorized()
     state = _now_playing.get(int(uid))
-    # нет вестей больше полутора минут — приложение закрыто, статус снимаем
-    if not state or not state["playing"] or time.time() - state["ts"] > 90:
-        return web.json_response({"playing": False})
+    # приложение шлёт вести каждые 25 секунд, даже на паузе; полторы минуты тишины — оно закрыто
+    if not state or time.time() - state["ts"] > 90:
+        return web.json_response({"playing": False, "paused": False})
     track = await db.get_track(state["id"])
     if not track:
-        return web.json_response({"playing": False})
+        return web.json_response({"playing": False, "paused": False})
     if _bot_username is None:
         try:
             _bot_username = (await request.app["bot"].me()).username or ""
         except Exception:
             _bot_username = ""
+    playing = state["playing"]
     return web.json_response({
-        "playing": True, "title": track["title"], "artist": track["artist"],
+        "playing": playing, "paused": not playing,
+        "title": track["title"], "artist": track["artist"],
         "cover": track["cover"], "duration": track["duration"],
-        "position": state["pos"] + (time.time() - state["ts"]),
+        # на паузе позиция стоит на месте
+        "position": state["pos"] + (time.time() - state["ts"] if playing else 0),
         "brand": BRAND, "link": f"https://t.me/{_bot_username}" if _bot_username else None,
+        # иконка приложения — аватарка бота, её же отдаёт /api/logo
+        "logo": f"{WEBAPP_URL}/api/logo" if request.app["logo"] and WEBAPP_URL else None,
     })
 
 

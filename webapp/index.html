@@ -1028,7 +1028,8 @@ function reportNow() {
     .catch(() => {});
 }
 ['playing', 'pause', 'seeked'].forEach(ev => audio.addEventListener(ev, reportNow));
-setInterval(() => { if (!audio.paused) reportNow(); }, 25000);  // сервер снимает статус, если вестей нет 90 секунд
+// шлём и на паузе: сервер снимает статус, если вестей нет 90 секунд (значит, приложение закрыто)
+setInterval(reportNow, 25000);
 async function openDiscord() {
   tap();
   $('#dccode').value = 'Загружаю…';
