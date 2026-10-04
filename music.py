@@ -755,6 +755,93 @@ async def genre_chart(genre: str, limit: int = 25) -> list[Found]:
     return []
 
 
+# ── дискография исполнителя: альбомы, EP, макси-синглы, синглы ───────────
+
+_disco_cache: dict[str, tuple[float, dict]] = {}
+_SC_KINDS = {"album": "album", "ep": "ep", "single": "single", "compilation": "compile"}
+
+
+def _kind(kind: str, count: int | None) -> str:
+    """Макси-сингл — сингл из трёх и более треков: отдельного типа ни у Deezer, ни у SoundCloud нет."""
+    return "maxi" if kind == "single" and count and count >= 3 else kind
+
+
+async def artist_discography(name: str) -> dict:
+    """Релизы исполнителя. Сначала ищем его в Deezer; если там нет — на SoundCloud, где у
+    независимых артистов кроме альбомов и EP бывают просто загруженные треки (считаем их синглами).
+    {'source': 'deezer'|'soundcloud', 'releases': [...], 'tracks': [Found, ...]}"""
+    key = name.casefold()
+    if key in _disco_cache and time.time() - _disco_cache[key][0] < 6 * 3600:
+        return _disco_cache[key][1]
+    result = {"source": None, "releases": [], "tracks": []}
+    try:
+        dz = await _deezer_artist(name)
+    except Exception:
+        dz = None
+    if dz:
+        data = (await _deezer(f"artist/{dz['id']}/albums", limit=100)).get("data") or []
+        # число треков есть только в карточке альбома — узнаём его у свежих синглов
+        singles = sorted((a for a in data if a.get("record_type") == "single"),
+                         key=lambda a: a.get("release_date") or "", reverse=True)[:15]
+        gate = asyncio.Semaphore(5)
+
+        async def count(a):
+            async with gate:
+                return a["id"], (await _deezer(f"album/{a['id']}")).get("nb_tracks")
+
+        got = await asyncio.gather(*(count(a) for a in singles), return_exceptions=True)
+        counts = dict(g for g in got if isinstance(g, tuple))
+        for a in data:
+            if not a.get("id"):
+                continue
+            kind = {"ep": "ep", "single": "single", "compile": "compile"}.get(a.get("record_type"), "album")
+            n = counts.get(a["id"])
+            result["releases"].append({
+                "kind": _kind(kind, n), "source": "deezer", "id": a["id"], "url": None,
+                "title": a.get("title") or "", "cover": a.get("cover_medium"),
+                "date": a.get("release_date") or "", "count": n})
+        result["source"] = "deezer"
+    else:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20),
+                                         headers={"User-Agent": "Mozilla/5.0 MusicCloudBot"}) as s:
+            client_id = await _soundcloud_client_id(s)
+
+            async def get(path, **params):
+                async with s.get(f"https://api-v2.soundcloud.com/{path}",
+                                 params={**params, "client_id": client_id}) as r:
+                    return (await r.json(content_type=None) or {}) if r.status == 200 else {}
+
+            if client_id:
+                users = (await get("search/users", q=name, limit=10)).get("collection") or []
+                user = max((u for u in users if (u.get("username") or "").casefold() == key),
+                           key=lambda u: u.get("followers_count") or 0, default=None)
+                if user:
+                    sets, tracks = await asyncio.gather(get(f"users/{user['id']}/albums", limit=50),
+                                                        get(f"users/{user['id']}/tracks", limit=40))
+                    for p in sets.get("collection") or []:
+                        kind = _SC_KINDS.get(p.get("set_type") or "album", "album")
+                        art = (p.get("artwork_url") or "").replace("-large.", "-t300x300.") or None
+                        result["releases"].append({
+                            "kind": _kind(kind, p.get("track_count")), "source": "sc_set",
+                            "id": p.get("id"), "url": p.get("permalink_url"), "title": p.get("title") or "",
+                            "cover": art, "count": p.get("track_count"),
+                            "date": (p.get("release_date") or p.get("published_at") or p.get("created_at") or "")[:10]})
+                    result["tracks"] = [f for t in tracks.get("collection") or []
+                                        if _sc_playable(t) and (f := _sc_found(t))]
+                    result["source"] = "soundcloud"
+    _disco_cache[key] = (time.time(), result)
+    return result
+
+
+async def soundcloud_set(url: str) -> tuple[str, str | None, list[Found]] | None:
+    """Альбом / EP / сингл SoundCloud по ссылке: (название, обложка, треки)."""
+    got = await _soundcloud_playlist(url)
+    if not got:
+        return None
+    title, tracks = got
+    return title, (tracks[0].cover if tracks else None), tracks
+
+
 async def related_tracks(name: str) -> list[Found]:
     """Лучшие треки трёх самых похожих на исполнителя артистов (без него самого)."""
     found = await _deezer_artist(name)

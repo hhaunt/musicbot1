@@ -11,7 +11,7 @@ import time
 from collections import Counter
 from itertools import zip_longest
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 from aiogram import Bot, Dispatcher
 from aiogram.exceptions import TelegramBadRequest
@@ -335,6 +335,55 @@ async def api_artist(request):
                               "fans": info["fans"], "picture": info["picture"],
                               "platforms": info.get("followers") or [],
                               **await social_json(uid, "artist", name)})
+
+
+RELEASE_KINDS = (("album", "Альбомы"), ("ep", "EP"), ("maxi", "Макси-синглы"),
+                 ("single", "Синглы"), ("compile", "Сборники"))
+
+
+@routes.get("/api/artist/discography")
+async def api_artist_discography(request):
+    """Релизы исполнителя по типам, в каждом разделе свежие сверху, плюс самый новый релиз."""
+    uid = user_id(request)
+    name = " ".join(request.query.get("name", "").split())[:100]
+    if not name:
+        raise web.HTTPBadRequest()
+    try:
+        disco = await music.artist_discography(name)
+    except Exception as e:
+        log.warning("discography failed for %r: %s", name, e)
+        disco = {"source": None, "releases": [], "tracks": []}
+    releases = [dict(r) for r in disco["releases"]]
+    # на SoundCloud отдельные загрузки — это синглы; их можно сразу включить
+    for t in await save_tracks(uid, disco["tracks"]):
+        releases.append({"kind": "single", "source": "sc_track", "id": t["id"], "url": None,
+                         "title": t["title"], "cover": t["cover"], "count": 1,
+                         "date": t["released"] or "", "track": t})
+    releases.sort(key=lambda r: r["date"] or "", reverse=True)
+    sections = [{"kind": kind, "title": title, "items": [r for r in releases if r["kind"] == kind]}
+                for kind, title in RELEASE_KINDS]
+    return web.json_response({"source": disco["source"], "latest": releases[0] if releases else None,
+                              "sections": [s for s in sections if s["items"]]})
+
+
+@routes.get("/api/scset")
+async def api_scset(request):
+    """Альбом, EP или сингл с SoundCloud — только ссылки на сам SoundCloud."""
+    uid = user_id(request)
+    url = request.query.get("url", "")
+    host = (urlparse(url).hostname or "").lower()
+    if not (host == "soundcloud.com" or host.endswith(".soundcloud.com")):
+        raise web.HTTPBadRequest()
+    try:
+        got = await music.soundcloud_set(url)
+    except Exception as e:
+        log.warning("soundcloud set failed for %s: %s", url, e)
+        got = None
+    if not got:
+        raise web.HTTPNotFound()
+    title, cover, tracks = got
+    return web.json_response({"title": title, "cover": cover, "url": url,
+                              "tracks": await save_tracks(uid, tracks)})
 
 
 @routes.post("/api/social")

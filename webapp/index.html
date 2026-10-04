@@ -105,6 +105,10 @@ header{padding:calc(18px + var(--sat)) 20px 12px;flex:none}
 .cmform{display:flex;gap:8px;align-items:center;margin-top:14px}
 .cmform input{flex:1;min-width:0;font-size:16px;border-bottom:1px solid var(--line);padding:8px 0}
 .cmform input::placeholder{color:var(--dim)}
+/* самый свежий релиз на странице исполнителя */
+.newrel{display:flex;gap:16px;align-items:center;padding:4px 0 10px;cursor:pointer;animation:rise .5s var(--ease)}
+.newrel .cover{width:96px;height:96px}
+.newrel b{font-size:18px}
 /* сетка жанров на вкладке поиска */
 .genres{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 .genre{border:1px solid var(--line);background:var(--card);padding:18px 14px;text-align:left;font-weight:700;font-size:15px;
@@ -1403,6 +1407,29 @@ async function renderPage(my) {
       ...(d.tracks.length ? d.tracks.map((t, i) => trackRow(t, i, d.tracks)) : [empty('∅', 'Плейлист пуст')]),
     ], d.tracks.length || '');
   }
+  if (p.type === 'scset') {  // альбом, EP или сингл с SoundCloud
+    $('#title').textContent = p.title || 'Релиз';
+    if (!p.data) {
+      show([h('div', {class: 'sub'}, back()), ...skeleton()]);
+      try { p.data = await api('scset?url=' + encodeURIComponent(p.url)); }
+      catch (e) { if (my === seq) { toast('Не удалось открыть релиз'); closePage(); } return; }
+      if (my !== seq) return;
+    }
+    const d = p.data;
+    const save = h('button', {class: 'pill', onclick: async () => {
+      if (save.disabled) return;
+      tap(); save.disabled = true; save.textContent = 'Сохраняю…';
+      try { await importPlaylist(d.url); save.textContent = 'Сохранено'; toast('Сохранено в ваши плейлисты'); }
+      catch (err) { toast(err.message); save.disabled = false; save.textContent = '＋ В плейлисты'; }
+    }}, '＋ В плейлисты');
+    return show([
+      h('div', {class: 'sub'}, back(), h('span', {class: 'grow'}), save,
+        h('button', {class: 'pill inv', onclick: () => d.tracks.length && playQueue(d.tracks, 0)}, 'Слушать')),
+      h('div', {class: 'albumhead'}, cover({id: d.title.length, cover: d.cover}),
+        h('div', {class: 'meta'}, h('b', {}, d.title), h('small', {}, d.tracks.length + ' треков · SoundCloud'))),
+      ...(d.tracks.length ? d.tracks.map((t, i) => trackRow(t, i, d.tracks)) : [empty('∅', 'В релизе нет доступных треков')]),
+    ], d.tracks.length || '');
+  }
   if (p.type === 'album') {  // альбом, открытый из ленты релизов
     $('#title').textContent = 'Альбом';
     if (!p.data) {
@@ -1485,7 +1512,14 @@ async function renderPage(my) {
   show([h('div', {class: 'sub'}, back()), ...skeleton()]);
   p.sort = p.sort || 'popular';  // у исполнителя: самые популярные или самые новые треки
   let data;
-  try { data = await api(isUser ? 'user/' + p.id : `artist?name=${encodeURIComponent(p.name)}&sort=${p.sort}`); }
+  try {
+    // дискография не меняется при переключении вкладок треков — грузим её один раз на страницу
+    const [d, disco] = await Promise.all([
+      api(isUser ? 'user/' + p.id : `artist?name=${encodeURIComponent(p.name)}&sort=${p.sort}`),
+      isUser || p.disco ? null : api('artist/discography?name=' + encodeURIComponent(p.name)).catch(() => null)]);
+    data = d;
+    if (disco) p.disco = disco;
+  }
   catch (e) { if (my === seq) { toast(isUser ? 'Профиль закрыт или не найден' : 'Не удалось открыть исполнителя'); closePage(); } return; }
   if (my !== seq) return;
   if (isUser) $('#title').textContent = data.name;
@@ -1501,12 +1535,38 @@ async function renderPage(my) {
           (data.platforms || []).length ? h('div', {class: 'stats', style: 'border-top:0;margin-top:6px'},
             data.platforms.map(x => stat(fmtNum(x.count), x.platform))) : null),
     counter,
+    ...(isUser ? [] : discography(p.disco)),
+    isUser ? null : h('div', {class: 'label', style: 'padding-top:14px'}, 'ТРЕКИ'),
     isUser ? null : h('div', {class: 'pillrow', style: 'padding-top:4px'}, sortBtn('popular', 'Популярные'), sortBtn('new', 'Новые')),
     data.tracks.length ? h('div', {class: 'sub'}, h('span', {class: 'grow note', style: 'padding:0'},
         isUser ? 'Лайки слушателя' : p.sort === 'new' ? 'Новые треки' : 'Самые популярные'),
       h('button', {class: 'pill inv', onclick: () => playQueue(data.tracks, 0)}, 'Слушать')) : null,
     ...(data.tracks.length ? data.tracks.map((t, i) => trackRow(t, i, data.tracks)) : [empty('∅', isUser ? 'Лайков пока нет' : 'Треки не найдены')]),
   ], data.tracks.length || '');
+}
+/* ── дискография исполнителя: новый релиз, затем альбомы, EP, макси-синглы, синглы ── */
+const KIND_NAME = {album: 'Альбом', ep: 'EP', maxi: 'Макси-сингл', single: 'Сингл', compile: 'Сборник'};
+const releaseInfo = r => [r.date ? r.date.slice(0, 4) : '', KIND_NAME[r.kind] || '', r.count > 1 ? r.count + ' тр.' : '']
+  .filter(Boolean).join(' · ');
+function openRelease(r) {
+  tap();
+  if (r.source === 'deezer') openPage({type: 'album', id: r.id});
+  else if (r.source === 'sc_set') openPage({type: 'scset', url: r.url, title: r.title});
+  else if (r.track) { playQueue([r.track], 0); document.body.classList.add('open-player'); cancelAnimationFrame(raf); drawViz(); }
+}
+function discography(d) {
+  if (!d || !d.latest) return [];
+  const r = d.latest;
+  return [
+    h('div', {class: 'label', style: 'padding-top:14px'}, 'НОВЫЙ РЕЛИЗ'),
+    h('div', {class: 'newrel', onclick: () => openRelease(r)}, cover(r),
+      h('div', {class: 'meta'}, h('b', {}, r.title), h('small', {}, releaseInfo(r)))),
+    ...d.sections.flatMap(s => [
+      h('div', {class: 'label'}, s.title.toUpperCase() + ' · ' + s.items.length),
+      h('div', {class: 'hscroll'}, s.items.map((x, i) => h('div', {class: 'rel', style: `animation-delay:${Math.min(i, 8) * 45}ms`,
+        onclick: () => openRelease(x)}, cover(x), h('b', {}, x.title), h('small', {}, releaseInfo(x))))),
+    ]),
+  ];
 }
 $('#partist').onclick = () => {
   if (!S.cur || !S.cur.artist) return;
