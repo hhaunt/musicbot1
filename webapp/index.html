@@ -682,10 +682,10 @@ function renderCloud() {
       h('button', {class: 'pill inv', onclick: () => playQueue(list, 0)}, 'Слушать')),
     h('div', {class: 'note'}, (() => {
       const b = c.based_on || {}, parts = [];
+      if ((b.seeds || []).length) parts.push('волна от ваших треков: ' + b.seeds.join(', '));
       if ((b.artists || []).length) parts.push('чаще всего вы слушаете ' + b.artists.join(', '));
-      if (b.genre) parts.push('любимый жанр «' + b.genre + '»');
-      if (b.related) parts.push('немного похожего на ' + b.related);
-      return parts.length ? parts.join(' · ').replace(/^./, s => s.toUpperCase()) : 'Подборка по вашему вкусу';
+      return parts.length ? parts.join(' · ').replace(/^./, s => s.toUpperCase()) + '. Пропускайте то, что не нравится, — волна подстроится.'
+        : 'Подборка по вашему вкусу';
     })()),
     ...list.map((t, i) => trackRow(t, i, list)),
   ], list.length);
@@ -990,7 +990,12 @@ $('#mutebtn').onclick = () => { tap(); if (volume === 0) setVolume(.5); else { m
 $('#mplay').onclick = e => { e.stopPropagation(); toggle(); };
 $('#playbtn').onclick = toggle;
 $('#prevbtn').onclick = () => { tap(); audio.currentTime > 4 ? (audio.currentTime = 0) : step(-1); };
-$('#nextbtn').onclick = () => { tap(); step(1); };
+$('#nextbtn').onclick = () => {
+  tap();
+  // пропуск в первые 30 секунд — сигнал волне «не моё»
+  if (S.cur && audio.currentTime < 30) api('skip/' + S.cur.id, {method: 'POST'}).catch(() => {});
+  step(1);
+};
 $('#loopbtn').onclick = e => { tap(); S.loop = !S.loop; e.target.classList.toggle('on', S.loop); toast(S.loop ? 'Повтор трека включён' : 'Повтор выключен'); };
 $('#mini').onclick = () => { document.body.classList.add('open-player'); cancelAnimationFrame(raf); drawViz(); };
 $('#pclose').onclick = () => { document.body.classList.remove('open-player'); cancelAnimationFrame(raf); };

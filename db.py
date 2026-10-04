@@ -99,6 +99,13 @@ CREATE TABLE IF NOT EXISTS comments (
     created INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS comments_track ON comments (track_id);
+-- пропуски в первые 30 секунд — сигнал «не моё» для волны
+CREATE TABLE IF NOT EXISTS skips (
+    user_id INTEGER NOT NULL,
+    track_id INTEGER NOT NULL,
+    created INTEGER NOT NULL,
+    PRIMARY KEY (user_id, track_id)
+);
 -- кто и когда пользовался: source = bot (чат с ботом) | app (мини-приложение)
 CREATE TABLE IF NOT EXISTS usage (
     user_id INTEGER NOT NULL,
@@ -303,6 +310,29 @@ async def add_listen(user_id: int, track_id: int, seconds: int) -> None:
         "ON CONFLICT(user_id, track_id) DO UPDATE SET seconds = seconds + excluded.seconds",
         (user_id, track_id, seconds))
     await _db.commit()
+
+
+async def add_skip(user_id: int, track_id: int) -> None:
+    await _db.execute("INSERT OR REPLACE INTO skips (user_id, track_id, created) VALUES (?, ?, ?)",
+                      (user_id, track_id, int(time.time())))
+    await _db.commit()
+
+
+async def skipped_ids(user_id: int) -> set[int]:
+    return {r["track_id"] for r in await _all("SELECT track_id FROM skips WHERE user_id = ?", user_id)}
+
+
+async def skipped_artists(user_id: int) -> dict[str, int]:
+    """Сколько раз человек быстро пропускал треки каждого исполнителя."""
+    rows = await _all("SELECT t.artist, COUNT(*) AS n FROM skips s JOIN tracks t ON t.id = s.track_id "
+                      "WHERE s.user_id = ? GROUP BY t.artist", user_id)
+    return {r["artist"]: r["n"] for r in rows}
+
+
+async def recent_play_ids(user_id: int, limit: int = 300) -> set[int]:
+    rows = await _all("SELECT track_id FROM plays WHERE user_id = ? ORDER BY id DESC LIMIT ?",
+                      user_id, limit)
+    return {r["track_id"] for r in rows}
 
 
 async def listen_rows(user_id: int):

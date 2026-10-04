@@ -9,6 +9,7 @@ import random
 import shutil
 import time
 from collections import Counter
+from itertools import zip_longest
 from pathlib import Path
 from urllib.parse import quote
 
@@ -501,91 +502,95 @@ async def _safe(coro, what: str) -> list:
         return []
 
 
-CLOUD_TOP_ARTISTS = 3   # сколько любимых исполнителей берём в подборку
-CLOUD_ARTIST_SHARE = 20  # из 30 треков — сами любимые исполнители
-CLOUD_RELATED = 4        # похожие на самого любимого — для открытий, немного
-CLOUD_GENRE = 6          # популярное в любимом жанре
+# «Моя волна» по образцу стриминговых сервисов: бесконечный поток вокруг того, что человек
+# слушает. Основа — похожие треки, которые сам SoundCloud подбирает к любимым трекам
+# слушателя; сверху немного его же лайков и любимых исполнителей. Быстрые пропуски
+# (в первые 30 секунд) — сигнал «не моё»: такие треки больше не попадают, а исполнитель,
+# которого пропустили трижды, выпадает из волны.
+WAVE_SEEDS = 5         # от скольких любимых треков строим волну за раз
+WAVE_SHARES = (("похоже на ваше", 20), ("ваш исполнитель", 5), ("из ваших лайков", 5))
 
 
-async def build_cloud(uid: int) -> dict:
-    """Подборка в первую очередь из треков исполнителей и жанра, которые человек больше
-    всего слушал и лайкал. Доли пропорциональны очкам из taste_profile; похожих исполнителей
-    совсем немного. Пока о вкусе ничего не известно, подборка пуста."""
-    rows = await db.taste(uid)
-    artists, genres = await taste_profile(uid)
-    top = artists.most_common(CLOUD_TOP_ARTISTS)
-    genre = genres.most_common(1)[0][0] if genres else None
-    total = sum(score for _, score in top) or 1
-    # доли: у самого любимого больше всего треков, но не меньше трёх у каждого из топа
-    quotas = [max(3, round(CLOUD_ARTIST_SHARE * score / total)) for _, score in top]
+async def build_cloud(uid: int, exclude: frozenset | set = frozenset()) -> dict:
+    favs = await db.favorites(uid)
+    artists, _ = await taste_profile(uid)
+    skipped = await db.skipped_ids(uid)
+    banned = {a.casefold() for a, n in (await db.skipped_artists(uid)).items() if n >= 3}
+    recent = await db.recent_play_ids(uid, 300)
 
-    async def nothing():
-        return []
+    # зёрна волны: лайкнутые треки и то, что долго слушали; чем любимее, тем чаще выпадают
+    weight: dict[int, float] = {}
+    for t in favs:
+        weight[t["id"]] = weight.get(t["id"], 0) + 3
+    for r in await db.listen_rows(uid):
+        weight[r["id"]] = weight.get(r["id"], 0) + r["seconds"] / 120
+    pool = [tid for tid in weight if tid not in skipped]
+    seeds: list = []
+    while pool and len(seeds) < WAVE_SEEDS:
+        tid = random.choices(pool, weights=[max(weight[t], 0.01) for t in pool])[0]
+        pool.remove(tid)
+        if (t := await db.get_track(tid)):
+            seeds.append(t)
 
-    # «ваш жанр» — не мировой чарт жанра (он почти весь из незнакомых зарубежных треков),
-    # а другие исполнители из вашей же истории, которых вы слушали в этом жанре
-    top_names = {name for name, _ in top}
-    genre_artists = Counter()
-    if genre:
-        for r in await db.listen_rows(uid):
-            name = _artist_of(r["title"], r["artist"])
-            if r["genre"] == genre and name and name not in top_names:
-                genre_artists[name] += r["seconds"]
-        for t in await db.favorites(uid):
-            name = _artist_of(t["title"], t["artist"])
-            if t["genre"] == genre and name and name not in top_names:
-                genre_artists[name] += 180
+    async def related():
+        got = await asyncio.gather(*(music.sc_related(t["url"], t["artist"], t["title"], 15)
+                                     for t in seeds), return_exceptions=True)
+        # по кругу от каждого зерна, чтобы волна не застревала на одном треке
+        lists = [g for g in got if isinstance(g, list)]
+        return [f for group in zip_longest(*lists) for f in group if f]
 
-    async def from_genre():
-        got = await asyncio.gather(*(music.artist_tracks(n, "popular", 8)
-                                     for n, _ in genre_artists.most_common(3)),
+    async def top_artists():
+        names = [name for name, _ in artists.most_common(3)]
+        got = await asyncio.gather(*(music.artist_tracks(n, "popular", 8) for n in names),
                                    return_exceptions=True)
         return [t for g in got if isinstance(g, list) for t in g]
 
-    found = await asyncio.gather(
-        *(_safe(music.artist_tracks(name, "popular", 15), f"artist {name}") for name, _ in top),
-        _safe(music.related_tracks(top[0][0]) if top else nothing(), "related"),
-        _safe(from_genre() if genre_artists else nothing(), "genre"))
-    buckets = [("ваш исполнитель", quota, tracks)
-               for quota, tracks in zip(quotas, found[:len(top)])]
-    buckets.append(("похожее", CLOUD_RELATED, found[len(top)]))
-    buckets.append(("ваш жанр", CLOUD_GENRE, found[len(top) + 1]))
-    for _, _, tracks in buckets:
-        random.shuffle(tracks)  # каждый раз другие треки тех же любимых исполнителей
+    found_related, found_artists = await asyncio.gather(_safe(related(), "related"),
+                                                        _safe(top_artists(), "artists"))
+    random.shuffle(found_artists)
+    # знакомое: лайки, которые давно не звучали
+    familiar = [t for t in favs if t["id"] not in recent and t["id"] not in exclude]
+    random.shuffle(familiar)
 
-    known = {t.lower() for t, _, _ in rows} | {t.split(" - ", 1)[1].lower()
-                                              for t, _, _ in rows if " - " in t}
-    seen: set[str] = set()
-    picked: list[tuple[music.Found, str]] = []
+    seen_ids: set[int] = set()
+    picked: list[tuple[int, str]] = []
 
-    def take(tracks: list, why: str) -> bool:
-        while tracks:
-            f = tracks.pop()
-            if f.url not in seen and f.title.lower() not in known:
-                seen.add(f.url)
-                picked.append((f, why))
-                return True
+    async def take(source: list, why: str, saved: bool) -> bool:
+        """Берёт из источника первый подходящий трек: не пропущенный, не звучавший недавно,
+        не от исполнителя, которого постоянно пропускают."""
+        while source:
+            item = source.pop(0)
+            artist = item["artist"] if saved else item.artist
+            if (artist or "").casefold() in banned:
+                continue
+            tid = item["id"] if saved else await db.upsert_found(item)
+            if tid in seen_ids or tid in skipped or tid in exclude or (not saved and tid in recent):
+                continue
+            seen_ids.add(tid)
+            picked.append((tid, why))
+            return True
         return False
 
-    # по одному треку из каждого источника по кругу — подборка вперемешку; сначала в пределах
-    # долей, потом добираем: в первую очередь из любимых исполнителей (они стоят в начале)
-    left = [quota for _, quota, _ in buckets]
+    sources = {"похоже на ваше": (found_related, False), "ваш исполнитель": (found_artists, False),
+               "из ваших лайков": (familiar, True)}
+    left = {why: share for why, share in WAVE_SHARES}
+    # по кругу: несколько похожих, потом что-то из своего — как чередует «волна»
     for limited in (True, False):
         progress = True
         while progress and len(picked) < CLOUD_SIZE:
             progress = False
-            for i, (why, _, tracks) in enumerate(buckets):
-                if len(picked) >= CLOUD_SIZE or (limited and left[i] <= 0):
+            for why, _ in WAVE_SHARES:
+                if len(picked) >= CLOUD_SIZE or (limited and left[why] <= 0):
                     continue
-                if take(tracks, why):
-                    left[i] -= 1
-                    progress = True
-    items = [(await db.upsert_found(f), why) for f, why in picked]
-    used = {why for _, why in items}
-    return {"items": items, "based_on": {
-        "artists": [name for name, _ in top],
-        "genre": genre if "ваш жанр" in used else None,
-        "related": top[0][0] if top and "похожее" in used else None,
+                source, saved = sources[why]
+                for _ in range(4 if why == "похоже на ваше" else 1):
+                    if len(picked) < CLOUD_SIZE and (not limited or left[why] > 0) \
+                            and await take(source, why, saved):
+                        left[why] -= 1
+                        progress = True
+    return {"items": picked, "based_on": {
+        "seeds": [f"{t['artist']} — {t['title']}" if t["artist"] else t["title"] for t in seeds[:3]],
+        "artists": [name for name, _ in artists.most_common(3)],
     }}
 
 
@@ -607,11 +612,22 @@ async def api_cloud_more(request):
     """Продолжение очереди, когда она закончилась: свежая подборка по вкусу без уже звучавшего."""
     uid = user_id(request)
     exclude = {int(x) for x in request.query.get("exclude", "").split(",") if x.isdigit()}
-    built = await build_cloud(uid)  # каждый раз новая: исполнители и похожие выбираются случайно
+    built = await build_cloud(uid, exclude)  # каждый раз новая: зёрна волны выбираются случайно
     favs = await fav_ids(uid)
     tracks = [{**track_json(await db.get_track(tid), favs), "why": why}
-              for tid, why in built["items"] if tid not in exclude]
+              for tid, why in built["items"]]
     return web.json_response(tracks)
+
+
+@routes.post("/api/skip/{tid}")
+async def api_skip(request):
+    """Трек пропустили в первые 30 секунд — волна больше его не предложит."""
+    uid = user_id(request)
+    tid = int(request.match_info["tid"])
+    if await db.get_track(tid):
+        await db.add_skip(uid, tid)
+        _cloud_cache.pop(uid, None)  # следующая подборка уже учтёт пропуск
+    return web.json_response({"ok": True})
 
 
 @routes.get("/api/search/all")

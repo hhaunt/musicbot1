@@ -329,6 +329,40 @@ async def sc_search(query: str, limit: int = 20) -> list[Found]:
     return [f for t in data.get("collection") or [] if _sc_playable(t) and (f := _sc_found(t))][:limit]
 
 
+_sc_ids: dict[str, int] = {}
+
+
+async def sc_related(url: str, artist: str, title: str, limit: int = 20) -> list[Found]:
+    """Похожие треки по мнению самого SoundCloud — основа «волны».
+    Если трек не с SoundCloud (например, из альбома Deezer), сначала находим его там."""
+    global _sc_client_id
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15),
+                                     headers={"User-Agent": "Mozilla/5.0 MusicCloudBot"}) as s:
+        client_id = await _soundcloud_client_id(s)
+        if not client_id:
+            return []
+        track_id = _sc_ids.get(url)
+        if not track_id and "soundcloud.com" in url:
+            async with s.get("https://api-v2.soundcloud.com/resolve",
+                             params={"url": url, "client_id": client_id}) as r:
+                track_id = ((await r.json(content_type=None)) or {}).get("id") if r.status == 200 else None
+        if not track_id:
+            async with s.get("https://api-v2.soundcloud.com/search/tracks",
+                             params={"q": f"{artist} {title}", "limit": 5, "client_id": client_id}) as r:
+                data = (await r.json(content_type=None) or {}) if r.status == 200 else {}
+            match = next((t for t in data.get("collection") or [] if _same_song(title, t.get("title") or "")), None)
+            track_id = match and match.get("id")
+        if not track_id:
+            return []
+        _sc_ids[url] = track_id
+        async with s.get(f"https://api-v2.soundcloud.com/tracks/{track_id}/related",
+                         params={"limit": min(50, limit * 2), "client_id": client_id}) as r:
+            if r.status in (401, 403):
+                _sc_client_id = None
+            data = (await r.json(content_type=None) or {}) if r.status == 200 else {}
+    return [f for t in data.get("collection") or [] if _sc_playable(t) and (f := _sc_found(t))][:limit]
+
+
 async def search(query: str, limit: int = 8) -> list[Found]:
     if SEARCH_SOURCE == "scsearch":
         try:
