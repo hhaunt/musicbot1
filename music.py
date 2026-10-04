@@ -1,5 +1,6 @@
 """Поиск и загрузка аудио через yt-dlp, альбомы — через открытый API Deezer."""
 import asyncio
+import logging
 import random
 import re
 import shutil
@@ -18,6 +19,7 @@ from config import (MAX_DOWNLOADS, MAX_FILE_SIZE, RELEASE_COUNTRIES, RELEASE_FRE
                     RELEASE_WORLD, SEARCH_SOURCE, SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET,
                     TMP_DIR, YANDEX_MUSIC_TOKEN)
 
+log = logging.getLogger("mono.music")
 DEEZER = "https://api.deezer.com"
 # Трек альбома не имеет ссылки: при загрузке он ищется по «исполнитель - название»
 SEARCH_PREFIX = "search:"
@@ -531,6 +533,8 @@ async def _soundcloud_client_id(s: aiohttp.ClientSession) -> str | None:
         if found:
             _sc_client_id = found.group(1)
             return _sc_client_id
+    log.warning("SoundCloud: не нашёл client_id (страница %d байт, скриптов %d) — "
+                "похожие треки и поиск через API недоступны", len(page), len(scripts))
     return None
 
 

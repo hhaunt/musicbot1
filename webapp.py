@@ -600,6 +600,7 @@ async def build_cloud(uid: int, exclude: frozenset | set = frozenset()) -> dict:
     # знакомое: лайки, которые давно не звучали
     familiar = [t for t in favs if t["id"] not in recent and t["id"] not in exclude]
     random.shuffle(familiar)
+    found_counts = (len(found_related), len(found_artists), len(familiar))
 
     seen_ids: set[int] = set()
     picked: list[tuple[int, str]] = []
@@ -637,6 +638,15 @@ async def build_cloud(uid: int, exclude: frozenset | set = frozenset()) -> dict:
                             and await take(source, why, saved):
                         left[why] -= 1
                         progress = True
+    if not picked and favs:
+        # ничего нового не нашлось (например, SoundCloud не ответил) — лучше крутить лайки,
+        # даже недавние, чем показывать пустую волну
+        for t in random.sample(list(favs), min(CLOUD_SIZE, len(favs))):
+            if t["id"] not in skipped and t["id"] not in exclude:
+                picked.append((t["id"], "из ваших лайков"))
+    # одна строка в лог на каждую сборку: по ней видно, какой источник подвёл
+    log.info("wave uid=%s likes=%d seeds=%d related=%d artists=%d familiar=%d picked=%d",
+             uid, len(favs), len(seeds), *found_counts, len(picked))
     return {"items": picked, "based_on": {
         "seeds": [f"{t['artist']} — {t['title']}" if t["artist"] else t["title"] for t in seeds[:3]],
         "artists": [name for name, _ in artists.most_common(3)],
