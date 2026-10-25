@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
 <title>MusicCloud</title>
+<link rel="icon" href="/api/logo">
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
 :root{
@@ -112,9 +113,17 @@ header{padding:calc(18px + var(--sat)) 20px 12px;flex:none}
   width:max(100vw,177.78vh);height:max(100vh,56.25vw)}
 #clip::after{content:"";position:absolute;top:0;right:0;bottom:0;left:0;
   background:linear-gradient(rgba(0,0,0,.35),rgba(0,0,0,.15) 40%,rgba(0,0,0,.85) 72%,#000)}
-body.has-clip #clip{opacity:1}
-body.has-clip:not(.show-lyrics) .disc{opacity:0;transition:opacity .8s}
-body.has-clip #player{color:#fff}
+/* клип загружен (clip-ready) — сверху появляется переключатель «Клип / Обложка»;
+   в режиме обложки клип стоит на паузе, а обложка с кольцами — как раньше */
+body.clip-ready:not(.cover-view) #clip{opacity:1}
+body.clip-ready:not(.cover-view):not(.show-lyrics) .disc{opacity:0}
+.disc{transition:width .55s var(--ease),height .55s var(--ease),opacity .8s}
+body.clip-ready:not(.cover-view) #player{color:#fff}
+#viewtoggle{display:none;border:1px solid var(--track);border-radius:99px;padding:2px;gap:2px}
+#viewtoggle button{font-size:11px;letter-spacing:.06em;padding:5px 12px;border-radius:99px;color:var(--dim)}
+#viewtoggle button.on{background:var(--fg);color:var(--bg)}
+body.clip-ready #viewtoggle{display:flex}
+body.clip-ready #nowlabel{display:none}
 #clipbtn.on{color:var(--bg);background:var(--fg)}
 /* самый свежий релиз на странице исполнителя */
 .newrel{display:flex;gap:16px;align-items:center;padding:4px 0 10px;cursor:pointer;animation:rise .5s var(--ease)}
@@ -385,7 +394,8 @@ body.open-sheet #shade{opacity:1;pointer-events:auto}
   <div id="clip"><div id="clipframe"></div></div>
   <div class="ptop">
     <button id="pclose" aria-label="Свернуть"><svg viewBox="0 0 24 24"><path d="M12 15.6 5.7 9.3l1.4-1.4 4.9 4.9 4.9-4.9 1.4 1.4z"/></svg></button>
-    <span>СЕЙЧАС ИГРАЕТ</span>
+    <span id="nowlabel">СЕЙЧАС ИГРАЕТ</span>
+    <div id="viewtoggle"><button data-view="clip">Клип</button><button data-view="cover">Обложка</button></div>
     <button id="addbtn" aria-label="В плейлист"><svg viewBox="0 0 24 24"><path d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6z"/></svg></button>
   </div>
   <div class="pbody">
@@ -1136,9 +1146,21 @@ function youtubeApi() {
   return CLIP.apiReady;
 }
 function hideClip() {
-  document.body.classList.remove('has-clip');
+  document.body.classList.remove('clip-ready');
   if (CLIP.player) { try { CLIP.player.stopVideo(); } catch (e) {} }
 }
+/* что показывать, когда клип есть: сам клип или обложку с анимациями (выбор запоминается) */
+const coverView = () => store.get('mc-clipview') === 'cover';
+function paintView() {
+  document.body.classList.toggle('cover-view', coverView());
+  document.querySelectorAll('#viewtoggle button').forEach(b =>
+    b.classList.toggle('on', (b.dataset.view === 'cover') === coverView()));
+  if (!CLIP.player || !document.body.classList.contains('clip-ready')) return;
+  try { (coverView() || audio.paused) ? CLIP.player.pauseVideo() : CLIP.player.playVideo(); } catch (e) {}
+}
+document.querySelectorAll('#viewtoggle button').forEach(b => b.onclick = () => {
+  tap(); store.set('mc-clipview', b.dataset.view); paintView();
+});
 async function loadClip() {
   const t = S.cur;
   $('#clipbtn').classList.toggle('on', clipsOn());
@@ -1159,15 +1181,20 @@ async function loadClip() {
     events: {
       onReady: e => { e.target.mute(); if (!audio.paused) e.target.playVideo(); },
       // показываем, только когда ролик реально пошёл, — без чёрного прямоугольника на старте
-      onStateChange: e => { if (e.data === YT.PlayerState.PLAYING && clipsOn() && S.cur && S.cur.id === CLIP.trackId)
-        document.body.classList.add('has-clip'); },
+      onStateChange: e => {
+        if (e.data === YT.PlayerState.PLAYING && clipsOn() && S.cur && S.cur.id === CLIP.trackId
+            && !document.body.classList.contains('clip-ready')) {
+          document.body.classList.add('clip-ready'); paintView();
+        }
+      },
       onError: () => hideClip(),  // встраивание запрещено правообладателем — остаётся обложка
     },
   });
 }
 audio.addEventListener('pause', () => { if (CLIP.player && CLIP.player.pauseVideo) CLIP.player.pauseVideo(); });
 audio.addEventListener('play', () => {
-  if (CLIP.player && CLIP.player.playVideo && document.body.classList.contains('has-clip')) CLIP.player.playVideo();
+  if (CLIP.player && CLIP.player.playVideo && document.body.classList.contains('clip-ready') && !coverView())
+    CLIP.player.playVideo();
 });
 $('#clipbtn').onclick = () => {
   tap();
@@ -1181,6 +1208,11 @@ function reportNow() {
   if (!S.cur || !S.me) return;
   api('nowplaying', {method: 'POST', body: JSON.stringify({id: S.cur.id, pos: audio.currentTime || 0, playing: !audio.paused})})
     .catch(() => {});
+  // приложение MusicCloud для Windows ставит статус в Discord само — передаём ему, что играет
+  if (window.chrome && window.chrome.webview) window.chrome.webview.postMessage({
+    type: 'nowplaying', title: S.cur.title, artist: S.cur.artist || '', cover: S.cur.cover || '',
+    duration: S.cur.duration || 0, position: audio.currentTime || 0, paused: audio.paused,
+    logo: location.origin + '/api/logo', brand: 'MusicCloud'});
 }
 ['playing', 'pause', 'seeked'].forEach(ev => audio.addEventListener(ev, reportNow));
 // шлём и на паузе: сервер снимает статус, если вестей нет 90 секунд (значит, приложение закрыто)
