@@ -600,21 +600,6 @@ async def api_comment_delete(request):
     return web.json_response({"ok": True})
 
 
-@routes.get("/api/clip/{tid}")
-async def api_clip(request):
-    """id клипа трека на YouTube для фона плеера; ищется один раз и запоминается."""
-    user_id(request)
-    track = await db.get_track(int(request.match_info["tid"]))
-    if not track:
-        raise web.HTTPNotFound()
-    clip = track["clip"] if "clip" in track.keys() else None
-    if clip is None:
-        clip = await music.find_clip(track["artist"], track["title"])
-        if clip is not None:  # не запоминаем «нет клипа», если YouTube просто не ответил
-            await db.set_clip(track["id"], clip)
-    return web.json_response({"video": clip or None})
-
-
 @routes.get("/api/lyrics/{tid}")
 async def api_lyrics(request):
     user_id(request)
