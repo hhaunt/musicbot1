@@ -146,7 +146,9 @@ async def init(path=DB_PATH) -> None:
     if "genre" not in columns:  # NULL — ещё не узнавали, '' — узнать не удалось
         await _db.execute("ALTER TABLE tracks ADD COLUMN genre TEXT")
     # прослушивания и лайки на площадке-источнике и дата выхода — для сортировки и показа
-    for col, kind in (("ext_plays", "INTEGER"), ("ext_likes", "INTEGER"), ("released", "TEXT")):
+    # clip: id клипа на YouTube ('' — искали, но не нашли)
+    for col, kind in (("ext_plays", "INTEGER"), ("ext_likes", "INTEGER"), ("released", "TEXT"),
+                      ("clip", "TEXT")):
         if col not in columns:
             await _db.execute(f"ALTER TABLE tracks ADD COLUMN {col} {kind}")
     if "notify" not in [r["name"] for r in await _all("PRAGMA table_info(users)")]:
@@ -315,6 +317,11 @@ async def add_listen(user_id: int, track_id: int, seconds: int) -> None:
         "INSERT INTO listen_time (user_id, track_id, seconds) VALUES (?, ?, ?) "
         "ON CONFLICT(user_id, track_id) DO UPDATE SET seconds = seconds + excluded.seconds",
         (user_id, track_id, seconds))
+    await _db.commit()
+
+
+async def set_clip(track_id: int, clip: str) -> None:
+    await _db.execute("UPDATE tracks SET clip = ? WHERE id = ?", (clip, track_id))
     await _db.commit()
 
 

@@ -358,6 +358,36 @@ async def sc_search(query: str, limit: int = 20) -> list[Found]:
     return [f for t in data.get("collection") or [] if _sc_playable(t) and not _sc_is_ai(t) and (f := _sc_found(t))][:limit]
 
 
+# ── клипы: фон плеера, как Canvas у Spotify ──────────────────────────────
+# Свой Canvas Spotify никому не отдаёт, поэтому берём клип с YouTube. Сервер только находит
+# id ролика; сам ролик проигрывает официальный встраиваемый плеер YouTube у слушателя.
+
+def _find_clip(artist: str, title: str) -> str:
+    if " - " in title and not artist:
+        artist, title = (x.strip() for x in title.split(" - ", 1))
+    clean = _JUNK.sub("", title).strip() or title
+    with YoutubeDL({"quiet": True, "no_warnings": True, "extract_flat": True,
+                    "skip_download": True}) as ydl:
+        info = ydl.extract_info(f"ytsearch5:{artist} {clean} official video", download=False) or {}
+    for e in info.get("entries") or []:
+        if not e or not e.get("id"):
+            continue
+        name = e.get("title") or ""
+        # тот же трек и не часовой микс; лирик-видео и обложки-статику пропускаем
+        if _same_song(clean, name) and (e.get("duration") or 0) <= 900 \
+                and not re.search(r"lyric|текст|audio|visualizer|static", name, re.IGNORECASE):
+            return e["id"]
+    return ""
+
+
+async def find_clip(artist: str, title: str) -> str | None:
+    """id клипа на YouTube, '' — подходящего нет, None — YouTube не ответил (спросим позже)."""
+    try:
+        return await asyncio.to_thread(_find_clip, artist, title)
+    except Exception:
+        return None
+
+
 _sc_ids: dict[str, int] = {}
 
 
