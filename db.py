@@ -99,6 +99,12 @@ CREATE TABLE IF NOT EXISTS comments (
     created INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS comments_track ON comments (track_id);
+-- входы в приложение для компьютера (подтверждённые через бота)
+CREATE TABLE IF NOT EXISTS desktop_tokens (
+    token TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    created INTEGER NOT NULL
+);
 -- пропуски в первые 30 секунд — сигнал «не моё» для волны
 CREATE TABLE IF NOT EXISTS skips (
     user_id INTEGER NOT NULL,
@@ -309,6 +315,21 @@ async def add_listen(user_id: int, track_id: int, seconds: int) -> None:
         "INSERT INTO listen_time (user_id, track_id, seconds) VALUES (?, ?, ?) "
         "ON CONFLICT(user_id, track_id) DO UPDATE SET seconds = seconds + excluded.seconds",
         (user_id, track_id, seconds))
+    await _db.commit()
+
+
+async def add_desktop_token(token: str, user_id: int) -> None:
+    await _db.execute("INSERT INTO desktop_tokens (token, user_id, created) VALUES (?, ?, ?)",
+                      (token, user_id, int(time.time())))
+    await _db.commit()
+
+
+async def desktop_tokens() -> dict[str, int]:
+    return {r["token"]: r["user_id"] for r in await _all("SELECT token, user_id FROM desktop_tokens")}
+
+
+async def delete_desktop_token(token: str) -> None:
+    await _db.execute("DELETE FROM desktop_tokens WHERE token = ?", (token,))
     await _db.commit()
 
 

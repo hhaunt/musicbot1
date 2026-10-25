@@ -6,6 +6,7 @@ import logging
 import mimetypes
 import os
 import random
+import secrets
 import shutil
 import time
 from collections import Counter
@@ -47,8 +48,25 @@ CLOUD_SIZE = 30       # треков в подборке
 
 # ── авторизация ──────────────────────────────────────────────────────────
 
+# ── вход в приложение для компьютера ─────────────────────────────────────
+# Вне Telegram подписанных данных нет, поэтому вход такой: приложение просит код, человек
+# открывает ссылку t.me/<бот>?start=login_<код>, бот подтверждает — и приложение получает
+# постоянный ключ (токен), который дальше отправляет в заголовке X-Desktop-Token.
+
+_desktop_tokens: dict[str, int] = {}          # токен → id пользователя (копия таблицы в памяти)
+_desktop_codes: dict[str, dict] = {}          # код входа → {"created", "token"}
+DESKTOP_CODE_TTL = 600
+
+
 def user_id(request: web.Request) -> int:
-    """Проверяет подпись Telegram у initData и возвращает id пользователя."""
+    """Проверяет подпись Telegram у initData (или ключ приложения для компьютера)
+    и возвращает id пользователя."""
+    token = request.headers.get("X-Desktop-Token", "")
+    if token:
+        uid = _desktop_tokens.get(token)
+        if not uid:
+            raise web.HTTPUnauthorized()
+        return uid
     try:
         data = safe_parse_webapp_init_data(BOT_TOKEN, request.headers.get("X-Init-Data", ""))
     except ValueError:
@@ -109,17 +127,23 @@ async def own_playlist(request: web.Request, uid: int):
 
 @routes.get("/api/me")
 async def api_me(request):
-    try:
-        tg = safe_parse_webapp_init_data(BOT_TOKEN, request.headers.get("X-Init-Data", "")).user
-    except ValueError:
-        tg = None
-    if not tg:
-        raise web.HTTPUnauthorized()
-    uid = tg.id
-    name = " ".join(x for x in (tg.first_name, tg.last_name) if x)[:64]
-    await db.upsert_user(uid, name, tg.username, tg.photo_url, PROFILES_PUBLIC_DEFAULT)
+    if request.headers.get("X-Desktop-Token"):
+        uid = user_id(request)  # приложение для компьютера: человек уже есть в базе после входа
+    else:
+        try:
+            tg = safe_parse_webapp_init_data(BOT_TOKEN, request.headers.get("X-Init-Data", "")).user
+        except ValueError:
+            tg = None
+        if not tg:
+            raise web.HTTPUnauthorized()
+        uid = tg.id
+        name = " ".join(x for x in (tg.first_name, tg.last_name) if x)[:64]
+        await db.upsert_user(uid, name, tg.username, tg.photo_url, PROFILES_PUBLIC_DEFAULT)
     await db.touch_usage(uid, "app")
+    user = await db.get_user(uid)
     return web.json_response({
+        "name": user["name"] if user else "", "username": user["username"] if user else None,
+        "photo": user["photo"] if user else None,
         "stats": await db.usage_stats() if uid in ADMIN_IDS else None,
         "uid": uid, "key": stream_key(uid),
         "favorites": len(await db.favorites(uid)),
@@ -261,6 +285,53 @@ async def api_releases(request):
             _releases_cache = (time.time(), [{"id": a.id, "title": a.title, "artist": a.artist,
                                               "cover": a.cover, "tag": a.tag} for a in found])
     return web.json_response(_releases_cache[1])
+
+
+@routes.post("/api/desktop/start")
+async def api_desktop_start(request):
+    """Начало входа на компьютере: код и ссылка на бота, которую нужно открыть в Telegram."""
+    now = time.time()
+    for code in [c for c, v in _desktop_codes.items() if now - v["created"] > DESKTOP_CODE_TTL]:
+        _desktop_codes.pop(code, None)
+    if len(_desktop_codes) > 1000:
+        raise web.HTTPTooManyRequests()
+    code = secrets.token_urlsafe(9).replace("-", "a").replace("_", "b")
+    _desktop_codes[code] = {"created": now, "token": None}
+    me = await request.app["bot"].me()
+    return web.json_response({"code": code, "link": f"https://t.me/{me.username}?start=login_{code}"})
+
+
+@routes.get("/api/desktop/poll")
+async def api_desktop_poll(request):
+    """Приложение спрашивает, подтвердил ли человек вход в боте."""
+    entry = _desktop_codes.get(request.query.get("code", ""))
+    if not entry or time.time() - entry["created"] > DESKTOP_CODE_TTL:
+        return web.json_response({"expired": True})
+    if not entry["token"]:
+        return web.json_response({"pending": True})
+    _desktop_codes.pop(request.query["code"], None)  # ключ отдаём один раз
+    return web.json_response({"token": entry["token"]})
+
+
+@routes.post("/api/desktop/logout")
+async def api_desktop_logout(request):
+    token = request.headers.get("X-Desktop-Token", "")
+    if token in _desktop_tokens:
+        _desktop_tokens.pop(token, None)
+        await db.delete_desktop_token(token)
+    return web.json_response({"ok": True})
+
+
+async def confirm_desktop_login(code: str, uid: int) -> bool:
+    """Вызывается ботом, когда человек нажал «Старт» по ссылке входа."""
+    entry = _desktop_codes.get(code)
+    if not entry or entry["token"] or time.time() - entry["created"] > DESKTOP_CODE_TTL:
+        return False
+    token = secrets.token_urlsafe(32)
+    await db.add_desktop_token(token, uid)
+    _desktop_tokens[token] = uid
+    entry["token"] = token
+    return True
 
 
 @routes.post("/api/me/public")
@@ -1046,6 +1117,7 @@ async def start(bot: Bot, dp: Dispatcher, logo: bytes | None = None) -> web.AppR
     app["bot"] = bot
     global _app_bot
     _app_bot = bot
+    _desktop_tokens.update(await db.desktop_tokens())  # входы на компьютерах переживают перезапуск
     app["logo"] = logo
     SimpleRequestHandler(dispatcher=dp, bot=bot,
                          secret_token=WEBHOOK_SECRET).register(app, path=WEBHOOK_PATH)

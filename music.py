@@ -71,7 +71,8 @@ def _search(query: str, limit: int) -> list[Found]:
     opts = {"quiet": True, "no_warnings": True, "extract_flat": True, "skip_download": True}
     with YoutubeDL(opts) as ydl:
         info = ydl.extract_info(f"{SEARCH_SOURCE}{limit}:{query}", download=False)
-    return [f for f in map(_entry, (info or {}).get("entries") or []) if f]
+    return [f for f in map(_entry, (info or {}).get("entries") or [])
+            if f and not _looks_ai(f.title, f.artist)]
 
 
 def _entry(e: dict | None) -> Found | None:
@@ -291,6 +292,32 @@ def _download_any(candidates: list[str], query: str) -> Path:
 
 # ── SoundCloud напрямую: видно, какие треки можно проиграть ──────────────
 
+# Нейротреки: сгенерированные Suno, Udio и т. п. Авторы обычно сами помечают их в названии,
+# тегах или описании — по этим пометкам и отсеиваем. Это эвристика: неподписанные не поймать.
+_AI_MARKS = re.compile(
+    r"\b(suno|udio|riffusion|mubert|boomy|soundraw|aiva"
+    r"|ai[\s_-]?(generated|cover|covers|song|songs|music|remix|version|vocals?|voice|made|track)"
+    r"|(generated|made|created|produced)\s+(by|with|using)\s+(an\s+)?ai"
+    r"|нейро\w*|нейросет\w*|сгенерир\w*|ии[\s-]?(кавер|трек|песн\w*|музык\w*))\b",
+    re.IGNORECASE)
+_AI_TAGS = {"ai", "aimusic", "ai music", "aicover", "ai cover", "suno", "sunoai", "suno ai", "udio",
+            "aigenerated", "ai generated", "нейросеть", "ии"}
+
+
+def _looks_ai(*texts: str, tags: str = "") -> bool:
+    if any(_AI_MARKS.search(t or "") for t in texts):
+        return True
+    # теги SoundCloud: «tag1 "tag с пробелом" tag3»
+    parsed = {(quoted or plain).strip().casefold()
+              for quoted, plain in re.findall(r'"([^"]+)"|(\S+)', tags or "")}
+    return bool(parsed & _AI_TAGS)
+
+
+def _sc_is_ai(t: dict) -> bool:
+    return _looks_ai(t.get("title") or "", t.get("description") or "",
+                     (t.get("user") or {}).get("username") or "", tags=t.get("tag_list") or "")
+
+
 def _sc_playable(t: dict) -> bool:
     """Трек играет целиком: не закрыт правообладателем (BLOCK), не только 30-секундный отрывок
     (SNIP) и есть хотя бы один незашифрованный поток. Зашифрованные (DRM) скачать нельзя."""
@@ -328,7 +355,7 @@ async def sc_search(query: str, limit: int = 20) -> list[Found]:
             if r.status != 200:
                 raise RuntimeError(f"SoundCloud ответил {r.status}")
             data = await r.json(content_type=None) or {}
-    return [f for t in data.get("collection") or [] if _sc_playable(t) and (f := _sc_found(t))][:limit]
+    return [f for t in data.get("collection") or [] if _sc_playable(t) and not _sc_is_ai(t) and (f := _sc_found(t))][:limit]
 
 
 _sc_ids: dict[str, int] = {}
@@ -362,7 +389,7 @@ async def sc_related(url: str, artist: str, title: str, limit: int = 20) -> list
             if r.status in (401, 403):
                 _sc_client_id = None
             data = (await r.json(content_type=None) or {}) if r.status == 200 else {}
-    return [f for t in data.get("collection") or [] if _sc_playable(t) and (f := _sc_found(t))][:limit]
+    return [f for t in data.get("collection") or [] if _sc_playable(t) and not _sc_is_ai(t) and (f := _sc_found(t))][:limit]
 
 
 async def search(query: str, limit: int = 8) -> list[Found]:
@@ -831,7 +858,7 @@ async def artist_discography(name: str) -> dict:
                             "cover": art, "count": p.get("track_count"),
                             "date": (p.get("release_date") or p.get("published_at") or p.get("created_at") or "")[:10]})
                     result["tracks"] = [f for t in tracks.get("collection") or []
-                                        if _sc_playable(t) and (f := _sc_found(t))]
+                                        if _sc_playable(t) and not _sc_is_ai(t) and (f := _sc_found(t))]
                     result["source"] = "soundcloud"
     _disco_cache[key] = (time.time(), result)
     return result

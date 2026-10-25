@@ -8,7 +8,7 @@ from pathlib import Path
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (BufferedInputFile, CallbackQuery, FSInputFile,
@@ -22,7 +22,7 @@ import music
 import releases
 import webapp
 from config import (ADMIN_IDS, BASE_DIR, BOT_TOKEN, BRAND, DB_PATH, MAX_PLAYLISTS, PAGE_SIZE,
-                    TMP_DIR, WEBAPP_URL)
+                    PROFILES_PUBLIC_DEFAULT, TMP_DIR, WEBAPP_URL)
 
 log = logging.getLogger("mono")
 router = Router()
@@ -267,6 +267,21 @@ async def cmd_stats(msg: Message):
             for key, title in (("all", "Всего людей"), ("bot", "Чат с ботом"), ("app", "Мини-приложение"))]
     rows.append(("Прослушиваний в приложении", "за всё время", str(s["plays"])))
     await msg.answer_photo(photo(images.list_card("Статистика", "пользователи", rows)))
+
+
+@router.message(CommandStart(deep_link=True, magic=F.args.regexp(r"^login_[A-Za-z0-9]{6,32}$")))
+async def cmd_desktop_login(msg: Message, command: CommandObject, state: FSMContext):
+    """Вход в приложение для компьютера: оно показало ссылку t.me/<бот>?start=login_<код>."""
+    await state.clear()
+    user = msg.from_user
+    if not await db.get_user(user.id):  # мини-приложение ещё не открывали — заводим профиль
+        await db.upsert_user(user.id, " ".join(x for x in (user.first_name, user.last_name) if x)[:64],
+                             user.username, None, PROFILES_PUBLIC_DEFAULT)
+    if await webapp.confirm_desktop_login(command.args[len("login_"):], user.id):
+        await msg.answer("✓  Вход в MusicCloud на компьютере выполнен — вернитесь в приложение.\n"
+                         "Если это были не вы, просто не нажимайте такие ссылки: без них войти нельзя.")
+    else:
+        await msg.answer("✕  Ссылка для входа устарела. Нажмите «Войти через Telegram» в приложении ещё раз.")
 
 
 @router.message(CommandStart())

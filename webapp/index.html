@@ -499,15 +499,28 @@ function toast(text) {
   const t = $('#toast'); t.textContent = text; t.classList.add('show');
   clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), 2200);
 }
+/* Вне Telegram (приложение для компьютера) подписанных данных нет — вместо них ключ,
+   полученный при входе через бота. Он хранится только на этом компьютере. */
+const DESKTOP = !(tg && tg.initData);
+const desktopToken = {
+  get() { try { return localStorage.getItem('mc-desktop-token'); } catch (e) { return null; } },
+  set(v) { try { v ? localStorage.setItem('mc-desktop-token', v) : localStorage.removeItem('mc-desktop-token'); } catch (e) {} },
+};
+function authHeaders() {
+  const h = {'Content-Type': 'application/json'};
+  if (DESKTOP) { if (desktopToken.get()) h['X-Desktop-Token'] = desktopToken.get(); }
+  else h['X-Init-Data'] = tg.initData;
+  return h;
+}
 async function api(path, opts = {}) {
-  const r = await fetch('/api/' + path, {...opts, headers: {'X-Init-Data': tg ? tg.initData : '', 'Content-Type': 'application/json'}});
+  const r = await fetch('/api/' + path, {...opts, headers: authHeaders()});
   if (!r.ok) throw new Error(r.status);
   return r.json();
 }
 /* импорт плейлиста по ссылке; сервер объясняет отказ текстом, поэтому не через api() */
 async function importPlaylist(url) {
   const r = await fetch('/api/playlists/import', {method: 'POST', body: JSON.stringify({url}),
-    headers: {'X-Init-Data': tg ? tg.initData : '', 'Content-Type': 'application/json'}});
+    headers: authHeaders()});
   const d = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(d.error || 'Не удалось импортировать плейлист');
   return d;
@@ -1019,7 +1032,12 @@ $('#dlbtn').onclick = async () => {
   const t = S.cur, b = $('#dlbtn');
   b.classList.add('busy'); toast('Готовлю файл…');
   try {
-    if (tg && tg.downloadFile && tg.isVersionAtLeast && tg.isVersionAtLeast('8.0')) {
+    if (DESKTOP) {  // на компьютере — обычное скачивание файла браузером
+      const {name} = await api('prepare/' + t.id, {method: 'POST'});
+      const a = h('a', {href: `/api/stream/${t.id}?u=${S.me.uid}&k=${S.me.key}&dl=1`, download: name});
+      document.body.append(a); a.click(); a.remove();
+      toast('Скачиваю «' + t.title + '»');
+    } else if (tg && tg.downloadFile && tg.isVersionAtLeast && tg.isVersionAtLeast('8.0')) {
       const {name} = await api('prepare/' + t.id, {method: 'POST'});
       tg.downloadFile({url: `${location.origin}/api/stream/${t.id}?u=${S.me.uid}&k=${S.me.key}&dl=1`, file_name: name});
     } else {
@@ -1082,7 +1100,7 @@ $('#cmform').addEventListener('submit', async e => {
   try {
     const r = await fetch('/api/comments/' + t.id, {method: 'POST',
       body: JSON.stringify({text, at: CM.withTime ? Math.floor(audio.currentTime) : null}),
-      headers: {'X-Init-Data': tg ? tg.initData : '', 'Content-Type': 'application/json'}});
+      headers: authHeaders()});
     const d = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(d.error || 'Не удалось отправить комментарий');
     input.value = '';
@@ -1306,7 +1324,7 @@ if (tg && tg.onEvent) {
 paintFullscreen();
 
 /* профиль из Telegram */
-const tgUser = (tg && tg.initDataUnsafe && tg.initDataUnsafe.user) || {};
+let tgUser = (tg && tg.initDataUnsafe && tg.initDataUnsafe.user) || {};
 function avatar(el) {
   const name = [tgUser.first_name, tgUser.last_name].filter(Boolean).join(' ') || 'Гость';
   el.textContent = name[0].toUpperCase();
@@ -1490,7 +1508,11 @@ async function renderPage(my) {
       h('div', {class: 'pillrow'}, tabBtn('history', 'История'), tabBtn('stats', 'Статистика'), tabBtn('subs', 'Подписки'),
         h('button', {class: 'pill', onclick: () => openPage({type: 'people'})}, 'Люди'),
         h('button', {class: 'pill', onclick: () => { tap(); openSheet('#profile'); }}, 'Оформление'),
-        h('button', {class: 'pill', onclick: openDiscord}, 'Discord'), pub, notify),
+        h('button', {class: 'pill', onclick: openDiscord}, 'Discord'), pub, notify,
+        DESKTOP ? h('button', {class: 'pill', onclick: async () => {  // выход на этом компьютере
+          await api('desktop/logout', {method: 'POST'}).catch(() => {});
+          desktopToken.set(null); location.reload();
+        }}, 'Выйти') : null),
       h('div', {class: 'note'}, me.public ? 'Другие слушатели видят ваше имя, аватарку и лайкнутые треки. История им не видна.'
                                           : 'Вас не видно в разделе «Люди». Откройте профиль, чтобы на вас могли подписаться.'),
       ...body,
@@ -1607,9 +1629,48 @@ if ('mediaSession' in navigator) {
   buildEq(); paintPlay(); applyVolume(); avatar($('#avatar'));
   const logo = h('img', {src: '/api/logo', alt: ''});  // аватарка бота вместо точки
   logo.onload = () => $('#dot').replaceWith(logo);
-  try { S.me = await api('me'); render(); }
-  catch (e) { $('#searchform').hidden = true; show(empty('●', 'Откройте приложение через бота в Telegram')); }
+  if (DESKTOP && !desktopToken.get()) return desktopLogin();
+  try {
+    S.me = await api('me');
+    if (DESKTOP) {  // профиль берём с сервера — данных Telegram тут нет
+      tgUser = {first_name: S.me.name, username: S.me.username, photo_url: S.me.photo};
+      avatar($('#avatar'));
+    }
+    render();
+  } catch (e) {
+    if (DESKTOP) { desktopToken.set(null); return desktopLogin(); }  // ключ отозван — входим заново
+    $('#searchform').hidden = true; show(empty('●', 'Откройте приложение через бота в Telegram'));
+  }
 })();
+
+/* вход на компьютере: ссылка на бота → «Старт» в Telegram → приложение получает ключ */
+async function desktopLogin() {
+  $('#searchform').hidden = true;
+  $('#title').textContent = 'Вход';
+  const status = h('div', {class: 'note', style: 'text-align:center;padding-top:16px'});
+  const btn = h('button', {class: 'pill inv', style: 'padding:12px 22px;font-size:15px', onclick: start}, 'Войти через Telegram');
+  show(h('div', {class: 'empty'}, h('div', {}, '☁'),
+    'Войдите тем же аккаунтом Telegram, что и в боте, — лайки, плейлисты и волна будут общими.',
+    h('div', {style: 'padding-top:22px'}, btn), status));
+  let timer = 0;
+  async function start() {
+    tap(); clearInterval(timer);
+    try {
+      const {code, link} = await api('desktop/start', {method: 'POST'});
+      window.open(link, '_blank');
+      status.replaceChildren('Откроется Telegram — нажмите там «Старт». Жду подтверждения…',
+        h('br'), h('a', {href: link, target: '_blank', style: 'color:var(--fg)'}, 'Ссылка не открылась? Нажмите сюда'));
+      btn.textContent = 'Получить новую ссылку';
+      timer = setInterval(async () => {
+        try {
+          const r = await api('desktop/poll?code=' + encodeURIComponent(code));
+          if (r.token) { clearInterval(timer); desktopToken.set(r.token); location.reload(); }
+          else if (r.expired) { clearInterval(timer); status.textContent = 'Ссылка устарела — получите новую.'; }
+        } catch (e) {}
+      }, 2000);
+    } catch (e) { status.textContent = 'Сервер не отвечает. Проверьте интернет и попробуйте ещё раз.'; }
+  }
+}
 </script>
 </body>
 </html>
