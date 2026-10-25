@@ -1,5 +1,7 @@
 """Веб-сервер мини-приложения: статика, JSON API и раздача аудио."""
 import asyncio
+import base64
+import binascii
 import hashlib
 import hmac
 import logging
@@ -142,8 +144,10 @@ async def api_me(request):
     await db.touch_usage(uid, "app")
     user = await db.get_user(uid)
     return web.json_response({
-        "name": user["name"] if user else "", "username": user["username"] if user else None,
-        "photo": user["photo"] if user else None,
+        **(user_json(user) if user else {"name": "", "photo": None}),
+        "username": user["username"] if user else None,
+        "custom_name": user["custom_name"] if user else None,  # для окна настроек
+        "tg_name": user["name"] if user else "",
         "stats": await db.usage_stats() if uid in ADMIN_IDS else None,
         "uid": uid, "key": stream_key(uid),
         "favorites": len(await db.favorites(uid)),
@@ -352,7 +356,44 @@ async def api_history(request):
 # ── люди и исполнители: подписки и лайки ─────────────────────────────────
 
 def user_json(u) -> dict:
-    return {"id": u["id"], "name": u["name"] or "Без имени", "photo": u["photo"]}
+    """Имя и фото для показа: свои из настроек, а если их нет — из Telegram."""
+    keys = u.keys()
+    name = (u["custom_name"] if "custom_name" in keys else None) or u["name"] or "Без имени"
+    photo = u["photo"]
+    if "custom_photo" in keys and u["custom_photo"]:
+        photo = f"/api/avatar/{u['id']}?v={u['photo_ver'] or 0}"
+    return {"id": u["id"], "name": name, "photo": photo}
+
+
+@routes.post("/api/me/profile")
+async def api_me_profile(request):
+    """Своё имя и фото. name: '' — вернуть имя из Telegram; reset_photo — вернуть фото из Telegram."""
+    uid = user_id(request)
+    body = await request.json()
+    name = None
+    if "name" in body:
+        name = " ".join(str(body.get("name") or "").split())[:40]
+    photo = None
+    if body.get("photo"):
+        try:
+            raw = base64.b64decode(str(body["photo"]).split(",", 1)[-1], validate=True)
+        except (ValueError, binascii.Error):
+            raise web.HTTPBadRequest()
+        # только небольшие JPEG/PNG: приложение само уменьшает фото до 256×256
+        if len(raw) > 300_000 or not (raw[:3] == b"\xff\xd8\xff" or raw[:8] == b"\x89PNG\r\n\x1a\n"):
+            return web.json_response({"error": "Нужна картинка JPEG или PNG до 300 КБ"}, status=400)
+        photo = raw
+    await db.set_profile(uid, name, photo, bool(body.get("reset_photo")))
+    return web.json_response(user_json(await db.get_user(uid)))
+
+
+@routes.get("/api/avatar/{uid}")
+async def api_avatar(request):
+    data = await db.avatar(int(request.match_info["uid"]))
+    if not data:
+        raise web.HTTPNotFound()
+    kind = "image/png" if data[:4] == b"\x89PNG" else "image/jpeg"
+    return web.Response(body=data, content_type=kind, headers={"Cache-Control": "public, max-age=86400"})
 
 
 async def social_json(uid: int, kind: str, target: str) -> dict:

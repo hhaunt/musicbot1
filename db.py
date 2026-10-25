@@ -151,8 +151,13 @@ async def init(path=DB_PATH) -> None:
                       ("clip", "TEXT")):
         if col not in columns:
             await _db.execute(f"ALTER TABLE tracks ADD COLUMN {col} {kind}")
-    if "notify" not in [r["name"] for r in await _all("PRAGMA table_info(users)")]:
+    user_cols = [r["name"] for r in await _all("PRAGMA table_info(users)")]
+    if "notify" not in user_cols:
         await _db.execute("ALTER TABLE users ADD COLUMN notify INTEGER NOT NULL DEFAULT 1")
+    # своё имя и фото, заданные в настройках; Telegram их не перезаписывает
+    for col, kind in (("custom_name", "TEXT"), ("custom_photo", "BLOB"), ("photo_ver", "INTEGER")):
+        if col not in user_cols:
+            await _db.execute(f"ALTER TABLE users ADD COLUMN {col} {kind}")
     await _db.executescript(BACKFILL)
     # треки вместе с числом прослушиваний и лайков внутри MusicCloud; пересоздаём после
     # миграций, чтобы в представление попали новые столбцы
@@ -320,6 +325,27 @@ async def add_listen(user_id: int, track_id: int, seconds: int) -> None:
     await _db.commit()
 
 
+# Имя и фото для показа другим: своё из настроек, иначе из Telegram
+_DISPLAY = ("COALESCE(u.custom_name, u.name) AS name, CASE WHEN u.custom_photo IS NOT NULL "
+            "THEN '/api/avatar/' || u.id || '?v=' || COALESCE(u.photo_ver, 0) ELSE u.photo END AS photo")
+
+
+async def set_profile(user_id: int, name: str | None = None, photo: bytes | None = None,
+                      reset_photo: bool = False) -> None:
+    """Своё имя ('' — вернуть имя из Telegram) и фото (reset_photo — вернуть фото из Telegram)."""
+    if name is not None:
+        await _db.execute("UPDATE users SET custom_name = ? WHERE id = ?", (name or None, user_id))
+    if photo is not None or reset_photo:
+        await _db.execute("UPDATE users SET custom_photo = ?, photo_ver = ? WHERE id = ?",
+                          (photo, int(time.time()), user_id))
+    await _db.commit()
+
+
+async def avatar(user_id: int) -> bytes | None:
+    row = await _one("SELECT custom_photo FROM users WHERE id = ?", user_id)
+    return row["custom_photo"] if row else None
+
+
 async def set_clip(track_id: int, clip: str) -> None:
     await _db.execute("UPDATE tracks SET clip = ? WHERE id = ?", (clip, track_id))
     await _db.commit()
@@ -393,13 +419,13 @@ async def add_comment(track_id: int, user_id: int, text: str, at: int | None) ->
 async def comments(track_id: int):
     """Комментарии трека с именем и аватаркой автора."""
     return await _all(
-        "SELECT c.*, u.name, u.photo FROM comments c LEFT JOIN users u ON u.id = c.user_id "
+        "SELECT c.*, " + _DISPLAY + " FROM comments c LEFT JOIN users u ON u.id = c.user_id "
         "WHERE c.track_id = ? ORDER BY c.id DESC LIMIT 300", track_id)
 
 
 async def get_comment(comment_id: int):
     return await _one(
-        "SELECT c.*, u.name, u.photo FROM comments c LEFT JOIN users u ON u.id = c.user_id "
+        "SELECT c.*, " + _DISPLAY + " FROM comments c LEFT JOIN users u ON u.id = c.user_id "
         "WHERE c.id = ?", comment_id)
 
 

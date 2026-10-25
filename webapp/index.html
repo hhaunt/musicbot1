@@ -125,6 +125,23 @@ body.clip-ready:not(.cover-view) #player{color:#fff}
 body.clip-ready #viewtoggle{display:flex}
 body.clip-ready #nowlabel{display:none}
 #clipbtn.on{color:var(--bg);background:var(--fg)}
+/* окно настроек */
+.setprofile{display:flex;gap:16px;align-items:center;margin-top:14px}
+.setprofile .ava.big{margin:0;width:72px;height:72px;font-size:26px;flex:none}
+.setprofile .grow{flex:1;min-width:0}
+.setprofile input{width:100%;font-size:16px;border-bottom:1px solid var(--line);padding:8px 0}
+.dimrow output{width:44px;text-align:right;font-variant-numeric:tabular-nums}
+.toggles{margin-top:6px}
+.toggle{display:flex;justify-content:space-between;align-items:center;width:100%;padding:12px 0;
+  border-bottom:1px solid var(--line);text-align:left;font-size:14px}
+.toggle small{display:block;color:var(--dim);font-size:12px;margin-top:2px}
+.toggle i{flex:none;width:38px;height:22px;border-radius:99px;background:var(--track);position:relative;
+  transition:background .3s}
+.toggle i::after{content:"";position:absolute;top:3px;left:3px;width:16px;height:16px;border-radius:50%;
+  background:var(--bg);transition:transform .3s var(--ease)}
+.toggle.on i{background:var(--fg)}
+.toggle.on i::after{transform:translateX(16px)}
+body.no-anim *,body.no-anim *::before,body.no-anim *::after{animation:none!important;transition:none!important}
 /* самый свежий релиз на странице исполнителя */
 .newrel{display:flex;gap:16px;align-items:center;padding:4px 0 10px;cursor:pointer;animation:rise .5s var(--ease)}
 .newrel .cover{width:96px;height:96px}
@@ -248,7 +265,9 @@ body.playing .ring:nth-child(2){animation-delay:1.6s}
 #pcover{width:100%;height:100%;transform:scale(.86);transition:transform .7s var(--ease)}
 body.playing #pcover{transform:scale(1)}
 body.loading #pcover{animation:breathe 1.2s ease-in-out infinite}
-.ptitle{width:100%;text-align:center;margin-top:18px}
+.ptitle{width:100%;text-align:center;margin-top:18px;transition:transform .7s var(--ease)}
+/* в режиме клипа название опускается ниже, ближе к кнопкам, — клип виден целиком */
+body.clip-ready:not(.cover-view):not(.show-lyrics) .ptitle{transform:translateY(min(14vh,110px))}
 .ptitle b,.ptitle small{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .ptitle b{font-size:21px;font-weight:700}
 .ptitle small{font-size:15px;color:var(--dim);margin-top:3px;cursor:pointer}
@@ -274,7 +293,12 @@ body.show-lyrics .ptitle small{font-size:13px}
 .volrow{display:flex;align-items:center;gap:10px;margin-top:10px;color:var(--dim)}
 .volrow button{width:28px;height:28px;display:grid;place-items:center;flex:none}
 .volrow svg{width:18px;height:18px}
-.volrow output{font-size:12px;width:30px;text-align:right;font-variant-numeric:tabular-nums}
+.volrow output{font-size:12px;width:30px;text-align:right;font-variant-numeric:tabular-nums;cursor:pointer}
+/* ползунок громкости спрятан, пока не нажать на значок динамика */
+.volwrap{flex:1;display:flex;align-items:center;gap:10px;min-width:0;max-width:0;opacity:0;overflow:hidden;
+  transition:max-width .45s var(--ease),opacity .3s}
+.volrow.open .volwrap{max-width:100%;opacity:1}
+.volrow.open #mutebtn{color:var(--fg)}
 .rng{flex:1;min-width:0;-webkit-appearance:none;appearance:none;height:18px;background:transparent}
 .rng::-webkit-slider-runnable-track{height:2px;background:linear-gradient(var(--fg),var(--fg)) 0/var(--p,100%) 100% no-repeat,var(--track)}
 .rng::-moz-range-track{height:2px;background:var(--track)}
@@ -420,9 +444,11 @@ body.open-sheet #shade{opacity:1;pointer-events:auto}
   <input id="seek" type="range" min="0" max="1000" value="0" aria-label="Перемотка">
   <div class="times"><span id="tcur">0:00</span><span id="tdur">0:00</span></div>
   <div class="volrow">
-    <button id="mutebtn" aria-label="Выключить звук"></button>
-    <input id="vol" class="rng" type="range" min="0" max="100" value="100" aria-label="Громкость">
-    <output id="volval">100</output>
+    <button id="mutebtn" aria-label="Громкость"></button>
+    <div class="volwrap">
+      <input id="vol" class="rng" type="range" min="0" max="100" value="100" aria-label="Громкость">
+      <output id="volval" title="Нажмите, чтобы выключить звук">100</output>
+    </div>
   </div>
   <div class="ctrl">
     <button class="txt" id="eqbtn">EQ</button>
@@ -466,7 +492,23 @@ body.open-sheet #shade{opacity:1;pointer-events:auto}
   <div class="note" style="padding:10px 0 0">Код личный: с ним можно видеть, что вы сейчас слушаете. Не отправляйте его другим.</div>
 </section>
 <section class="sheet" id="profile">
-  <h2>ТЕМА</h2>
+  <h2>ПРОФИЛЬ</h2>
+  <div class="setprofile">
+    <div class="ava big" id="setava"></div>
+    <div class="grow">
+      <input id="setname" maxlength="40" placeholder="Имя, которое видят другие">
+      <div class="pillrow" style="padding:10px 0 0">
+        <button class="pill inv" id="setsave">Сохранить</button>
+        <button class="pill" id="setphoto">Сменить фото</button>
+        <button class="pill" id="setreset">Как в Telegram</button>
+        <input type="file" id="setphotofile" accept="image/*" hidden>
+      </div>
+    </div>
+  </div>
+  <h2 class="sec">ИНТЕРФЕЙС</h2>
+  <div class="dimrow">Размер <input id="setzoom" class="rng" type="range" min="80" max="130" step="5" value="100" aria-label="Размер интерфейса"><output id="setzoomval">100%</output></div>
+  <div class="toggles" id="settoggles"></div>
+  <h2 class="sec">ТЕМА</h2>
   <div class="themes" id="themes"></div>
   <h2 class="sec">ОБОИ</h2>
   <div class="pillrow" style="padding-bottom:0">
@@ -964,7 +1006,7 @@ function load() {
 let loadingMore = false;
 async function step(d) {
   if (!S.queue.length) return;
-  if (d > 0 && S.idx >= S.queue.length - 1 && !loadingMore) {
+  if (d > 0 && S.idx >= S.queue.length - 1 && !loadingMore && isOn('mc-endless')) {
     loadingMore = true;
     try {
       const more = await api('cloud/more?exclude=' + S.queue.slice(-150).map(t => t.id).join(','));
@@ -1027,8 +1069,12 @@ audio.addEventListener('error', () => {
 $('#seek').addEventListener('input', e => { seeking = true; e.target.style.setProperty('--p', e.target.value / 10 + '%'); });
 $('#seek').addEventListener('change', e => { const d = total(); if (d) audio.currentTime = e.target.value / 1000 * d; seeking = false; });
 
-$('#vol').addEventListener('input', e => setVolume(e.target.value / 100));
-$('#mutebtn').onclick = () => { tap(); if (volume === 0) setVolume(.5); else { muted = !muted; applyVolume(); } };
+// значок динамика открывает и закрывает ползунок; через 4 секунды без дела он прячется сам
+let volTimer = 0;
+const volIdle = () => { clearTimeout(volTimer); volTimer = setTimeout(() => $('.volrow').classList.remove('open'), 4000); };
+$('#vol').addEventListener('input', e => { setVolume(e.target.value / 100); volIdle(); });
+$('#mutebtn').onclick = () => { tap(); if ($('.volrow').classList.toggle('open')) volIdle(); };
+$('#volval').onclick = () => { tap(); if (volume === 0) setVolume(.5); else { muted = !muted; applyVolume(); } volIdle(); };
 $('#mplay').onclick = e => { e.stopPropagation(); toggle(); };
 $('#playbtn').onclick = toggle;
 $('#prevbtn').onclick = () => { tap(); audio.currentTime > 4 ? (audio.currentTime = 0) : step(-1); };
@@ -1210,7 +1256,7 @@ function reportNow() {
     .catch(() => {});
   // приложение MusicCloud для Windows ставит статус в Discord само — передаём ему, что играет
   if (window.chrome && window.chrome.webview) window.chrome.webview.postMessage({
-    type: 'nowplaying', title: S.cur.title, artist: S.cur.artist || '', cover: S.cur.cover || '',
+    type: 'nowplaying', enabled: isOn('mc-discord'), title: S.cur.title, artist: S.cur.artist || '', cover: S.cur.cover || '',
     duration: S.cur.duration || 0, position: audio.currentTime || 0, paused: audio.paused,
     logo: location.origin + '/api/logo', brand: 'MusicCloud'});
 }
@@ -1423,6 +1469,62 @@ if (tg && tg.onEvent) {
 }
 paintFullscreen();
 
+/* ── настройки: профиль, размер интерфейса и переключатели ── */
+const isOn = key => store.get(key) !== 'off';  // всё включено, пока не выключат
+const TOGGLES = [
+  ['mc-anim', 'Анимации', 'Плавные переходы и движение', on => document.body.classList.toggle('no-anim', !on)],
+  ['mc-endless', 'Бесконечная волна', 'Когда очередь кончается, подбирать треки дальше', null],
+  ['mc-clips', 'Клипы на фоне плеера', 'Клип трека с YouTube вместо обложки, если он есть', () => loadClip()],
+  ['mc-discord', 'Статус в Discord', '«Слушает MusicCloud» в профиле Discord — в приложении для Windows', () => reportNow()],
+];
+function applyZoom(v) {
+  v = Math.max(80, Math.min(130, Number(v) || 100));
+  document.documentElement.style.zoom = v / 100;
+  $('#setzoom').value = v; $('#setzoom').style.setProperty('--p', (v - 80) / 50 * 100 + '%');
+  $('#setzoomval').textContent = v + '%';
+}
+function applyInterface() {
+  applyZoom(store.get('mc-zoom') || 100);
+  for (const [key, , , apply] of TOGGLES) if (apply && key === 'mc-anim') apply(isOn(key));
+}
+function paintToggles() {
+  $('#settoggles').replaceChildren(...TOGGLES.map(([key, label, note, apply]) =>
+    h('button', {class: 'toggle' + (isOn(key) ? ' on' : ''), onclick: () => {
+      tap(); store.set(key, isOn(key) ? 'off' : 'on'); paintToggles(); if (apply) apply(isOn(key));
+    }}, h('span', {}, label, h('small', {}, note)), h('i'))));
+}
+function refreshAvatar() {
+  if (!S.me) return;
+  tgUser = Object.assign({}, tgUser, {first_name: S.me.name || tgUser.first_name || S.me.username || '',
+                                      photo_url: S.me.photo || tgUser.photo_url});
+  avatar($('#avatar'));
+}
+function openSettings() {
+  paintToggles();
+  avatar($('#setava'));
+  $('#setname').value = (S.me && S.me.custom_name) || '';
+  $('#setname').placeholder = (S.me && S.me.tg_name) || 'Имя, которое видят другие';
+  openSheet('#profile');
+}
+async function saveProfile(body, done) {
+  try {
+    const r = await fetch('/api/me/profile', {method: 'POST', headers: authHeaders(), body: JSON.stringify(body)});
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || 'Не удалось сохранить профиль');
+    S.me = await api('me'); refreshAvatar(); avatar($('#setava')); toast(done);
+  } catch (err) { toast(err.message); }
+}
+$('#setzoom').addEventListener('input', e => { store.set('mc-zoom', e.target.value); applyZoom(e.target.value); });
+$('#setsave').onclick = () => { tap(); saveProfile({name: $('#setname').value}, 'Имя сохранено'); };
+$('#setreset').onclick = () => { tap(); $('#setname').value = ''; saveProfile({name: '', reset_photo: true}, 'Имя и фото — как в Telegram'); };
+$('#setphoto').onclick = () => { tap(); $('#setphotofile').click(); };
+$('#setphotofile').onchange = async e => {
+  const file = e.target.files[0]; e.target.value = '';
+  if (!file) return;
+  try { saveProfile({photo: await shrink(file, 256, .85)}, 'Фото обновлено'); }
+  catch (err) { toast('Не удалось открыть это фото'); }
+};
+
 /* профиль из Telegram */
 let tgUser = (tg && tg.initDataUnsafe && tg.initDataUnsafe.user) || {};
 function avatar(el) {
@@ -1607,7 +1709,7 @@ async function renderPage(my) {
         `Пользователей всего: ${me.stats.all.total} · бот: ${me.stats.bot.total} · приложение: ${me.stats.app.total} · за сутки: ${me.stats.all.day}`) : null,
       h('div', {class: 'pillrow'}, tabBtn('history', 'История'), tabBtn('stats', 'Статистика'), tabBtn('subs', 'Подписки'),
         h('button', {class: 'pill', onclick: () => openPage({type: 'people'})}, 'Люди'),
-        h('button', {class: 'pill', onclick: () => { tap(); openSheet('#profile'); }}, 'Оформление'),
+        h('button', {class: 'pill', onclick: () => { tap(); openSettings(); }}, 'Настройки'),
         h('button', {class: 'pill', onclick: openDiscord}, 'Discord'), pub, notify,
         DESKTOP ? h('button', {class: 'pill', onclick: async () => {  // выход на этом компьютере
           await api('desktop/logout', {method: 'POST'}).catch(() => {});
@@ -1725,17 +1827,16 @@ if ('mediaSession' in navigator) {
     tg.ready(); tg.expand();
     try { tg.disableVerticalSwipes(); } catch (e) {}
   }
-  applyTheme(store.get('mc-theme')); applyWall();
+  applyTheme(store.get('mc-theme')); applyWall(); applyInterface();
   buildEq(); paintPlay(); applyVolume(); avatar($('#avatar'));
   const logo = h('img', {src: '/api/logo', alt: ''});  // аватарка бота вместо точки
   logo.onload = () => $('#dot').replaceWith(logo);
   if (DESKTOP && !desktopToken.get()) return desktopLogin();
   try {
     S.me = await api('me');
-    if (DESKTOP) {  // профиль берём с сервера — данных Telegram тут нет
-      tgUser = {first_name: S.me.name || S.me.username || '', username: S.me.username, photo_url: S.me.photo};
-      avatar($('#avatar'));
-    }
+    // имя и фото — с сервера: там и данные Telegram, и своё имя/фото из настроек
+    if (DESKTOP) tgUser = {first_name: '', username: S.me.username, photo_url: null};
+    refreshAvatar();
     render();
   } catch (e) {
     if (DESKTOP) { desktopToken.set(null); return desktopLogin(); }  // ключ отозван — входим заново
