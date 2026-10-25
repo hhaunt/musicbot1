@@ -274,7 +274,8 @@ async def cmd_desktop_login(msg: Message, command: CommandObject, state: FSMCont
     """Вход в приложение для компьютера: оно показало ссылку t.me/<бот>?start=login_<код>."""
     await state.clear()
     user = msg.from_user
-    if not await db.get_user(user.id):  # мини-приложение ещё не открывали — заводим профиль
+    row = await db.get_user(user.id)
+    if not row or not row["name"]:  # профиля нет или в нём нет имени — берём из Telegram
         await db.upsert_user(user.id, " ".join(x for x in (user.first_name, user.last_name) if x)[:64],
                              user.username, None, PROFILES_PUBLIC_DEFAULT)
     if await webapp.confirm_desktop_login(command.args[len("login_"):], user.id):

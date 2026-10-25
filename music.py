@@ -544,13 +544,22 @@ async def search_artists(query: str, limit: int = 8) -> list[dict]:
 # Везде берём только исполнителя с точно таким же именем — иначе покажем чужие цифры.
 
 _sc_client_id: str | None = None
+_sc_lock = asyncio.Lock()
 
 
 async def _soundcloud_client_id(s: aiohttp.ClientSession) -> str | None:
-    """Открытый ключ веб-версии SoundCloud: его же сайт подставляет в свои запросы."""
-    global _sc_client_id
+    """Открытый ключ веб-версии SoundCloud: его же сайт подставляет в свои запросы.
+    Под замком: волна просит его сразу для пяти треков — искать ключ нужно один раз, а не пять."""
     if _sc_client_id:
         return _sc_client_id
+    async with _sc_lock:
+        if _sc_client_id:
+            return _sc_client_id
+        return await _find_soundcloud_client_id(s)
+
+
+async def _find_soundcloud_client_id(s: aiohttp.ClientSession) -> str | None:
+    global _sc_client_id
     async with s.get("https://soundcloud.com/") as r:
         page = await r.text()
     scripts = re.findall(r'<script crossorigin src="(https://a-v2\.sndcdn\.com/assets/[^"]+\.js)"', page)

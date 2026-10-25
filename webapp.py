@@ -729,12 +729,25 @@ async def api_cloud(request):
     uid = user_id(request)
     cached = _cloud_cache.get(uid)
     if "refresh" in request.query or not cached or time.time() - cached[0] > CLOUD_TTL:
-        cached = (time.time(), await build_cloud(uid))
-        _cloud_cache[uid] = cached
+        cached = (time.time(), await safe_build_cloud(uid))
+        if cached[1]["items"]:
+            _cloud_cache[uid] = cached
     favs = await fav_ids(uid)
-    tracks = [{**track_json(await db.get_track(tid), favs), "why": why}
-              for tid, why in cached[1]["items"]]
+    rows = [(await db.get_track(tid), why) for tid, why in cached[1]["items"]]
+    tracks = [{**track_json(t, favs), "why": why} for t, why in rows if t]
     return web.json_response({"based_on": cached[1]["based_on"], "tracks": tracks})
+
+
+async def safe_build_cloud(uid: int, exclude: frozenset | set = frozenset()) -> dict:
+    """Волна с ограничением по времени: площадки иногда отвечают долго, а прокси хостинга
+    обрывает запрос. Не успели или упали — отдаём лайки, но не ошибку."""
+    try:
+        return await asyncio.wait_for(build_cloud(uid, exclude), 25)
+    except Exception as e:
+        log.warning("wave build failed for uid=%s: %r — отдаю лайки", uid, e)
+        favs = [t for t in await db.favorites(uid) if t["id"] not in exclude]
+        return {"items": [(t["id"], "из ваших лайков") for t in random.sample(favs, min(CLOUD_SIZE, len(favs)))],
+                "based_on": {}}
 
 
 @routes.get("/api/cloud/more")
@@ -742,11 +755,10 @@ async def api_cloud_more(request):
     """Продолжение очереди, когда она закончилась: свежая подборка по вкусу без уже звучавшего."""
     uid = user_id(request)
     exclude = {int(x) for x in request.query.get("exclude", "").split(",") if x.isdigit()}
-    built = await build_cloud(uid, exclude)  # каждый раз новая: зёрна волны выбираются случайно
+    built = await safe_build_cloud(uid, exclude)  # каждый раз новая: зёрна выбираются случайно
     favs = await fav_ids(uid)
-    tracks = [{**track_json(await db.get_track(tid), favs), "why": why}
-              for tid, why in built["items"]]
-    return web.json_response(tracks)
+    rows = [(await db.get_track(tid), why) for tid, why in built["items"]]
+    return web.json_response([{**track_json(t, favs), "why": why} for t, why in rows if t])
 
 
 @routes.post("/api/skip/{tid}")

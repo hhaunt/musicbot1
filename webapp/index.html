@@ -1633,7 +1633,7 @@ if ('mediaSession' in navigator) {
   try {
     S.me = await api('me');
     if (DESKTOP) {  // профиль берём с сервера — данных Telegram тут нет
-      tgUser = {first_name: S.me.name, username: S.me.username, photo_url: S.me.photo};
+      tgUser = {first_name: S.me.name || S.me.username || '', username: S.me.username, photo_url: S.me.photo};
       avatar($('#avatar'));
     }
     render();
