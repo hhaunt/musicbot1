@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>MusicCloud — скачать</title>
+<link rel="icon" href="/api/logo">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/api/icon/180.png">
+<meta name="theme-color" content="#000000">
+<style>
+:root{--bg:#000;--fg:#fff;--dim:#8a8a8a;--line:#222;--card:#0d0d0d}
+*{box-sizing:border-box;margin:0}
+body{background:var(--bg);color:var(--fg);font:15px/1.5 -apple-system,"Segoe UI",Roboto,sans-serif;
+  min-height:100vh;padding:calc(28px + env(safe-area-inset-top,0px)) 16px calc(28px + env(safe-area-inset-bottom,0px))}
+main{max-width:520px;margin:0 auto}
+.head{display:flex;align-items:center;gap:14px;margin-bottom:26px}
+.head img{width:56px;height:56px;border-radius:16px;background:var(--card);object-fit:cover}
+h1{font-size:24px;letter-spacing:-.01em}
+.sub{color:var(--dim);font-size:13px}
+.card{border:1px solid var(--line);background:var(--card);border-radius:18px;padding:18px;margin-bottom:12px}
+.card h2{font-size:16px;margin-bottom:4px;display:flex;align-items:center;gap:8px}
+.card.main{border-color:#444}
+.tag{font-size:10px;letter-spacing:.08em;color:var(--bg);background:var(--fg);border-radius:99px;padding:2px 8px}
+.card p,.card li{color:var(--dim);font-size:14px}
+ol{padding-left:20px;margin-top:8px}
+li{margin:4px 0}
+li b{color:var(--fg);font-weight:600}
+.btn{display:inline-block;margin-top:12px;background:var(--fg);color:var(--bg);border:0;border-radius:99px;
+  padding:11px 20px;font-weight:600;font-size:15px;font-family:inherit;text-decoration:none;cursor:pointer}
+.btn.ghost{background:none;color:var(--fg);border:1px solid var(--line)}
+.foot{color:var(--dim);font-size:13px;text-align:center;margin-top:22px}
+.foot a{color:var(--fg)}
+[hidden]{display:none!important}
+</style>
+</head>
+<body>
+<main>
+  <div class="head">
+    <img src="/api/logo" alt="">
+    <div><h1>MusicCloud</h1><div class="sub">Музыка, волна и плейлисты на любом устройстве</div></div>
+  </div>
+
+  <div id="list">
+    <section class="card" data-os="android">
+      <h2>Android</h2>
+      <p>Приложение со своей иконкой на главном экране, без магазина.</p>
+      <button class="btn" data-install hidden>Установить</button>
+      <ol data-manual>
+        <li>Откройте эту страницу в <b>Chrome</b>.</li>
+        <li>Нажмите <b>⋮</b> справа сверху.</li>
+        <li>Выберите <b>«Установить приложение»</b> или <b>«Добавить на главный экран»</b>.</li>
+      </ol>
+    </section>
+
+    <section class="card" data-os="ios">
+      <h2>iPhone и iPad</h2>
+      <p>Иконка на экране «Домой», открывается во весь экран.</p>
+      <ol>
+        <li>Откройте эту страницу в <b>Safari</b>.</li>
+        <li>Нажмите <b>«Поделиться»</b> — квадрат со стрелкой вверх.</li>
+        <li>Выберите <b>«На экран „Домой“»</b> и нажмите <b>«Добавить»</b>.</li>
+      </ol>
+    </section>
+
+    <section class="card" data-os="windows">
+      <h2>Windows</h2>
+      <p>Программа со своим окном, кнопками мультимедиа и статусом «Слушает» в Discord.</p>
+      <ol>
+        <li>Скачайте архив и распакуйте его в любую папку.</li>
+        <li>Запустите <b>MusicCloud.exe</b>. Если Windows предупредит, нажмите <b>«Подробнее» → «Выполнить в любом случае»</b>.</li>
+      </ol>
+      <a class="btn" href="/download/windows">Скачать для Windows</a>
+    </section>
+
+    <section class="card" data-os="other">
+      <h2>Mac, Linux и другие компьютеры</h2>
+      <p>Откройте страницу в Chrome или Edge и нажмите значок установки в адресной строке
+        (или меню → «Установить MusicCloud»). Можно и просто слушать в браузере.</p>
+      <button class="btn" data-install hidden>Установить</button>
+    </section>
+  </div>
+
+  <div class="card">
+    <h2>Как войти</h2>
+    <p>Откройте приложение и нажмите «Войти через Telegram», затем «Старт» в боте.
+      Лайки, плейлисты и волна — те же, что в Telegram.</p>
+    <a class="btn ghost" href="/">Открыть плеер в браузере</a>
+  </div>
+
+  <div class="foot">Слушаете в Telegram? Всё по-прежнему работает и там.</div>
+</main>
+<script>
+const ua = navigator.userAgent;
+const ios = /iPhone|iPad|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const os = ios ? 'ios' : /Android/.test(ua) ? 'android' : /Windows/.test(ua) ? 'windows' : 'other';
+// своё устройство — первым и с пометкой
+const mine = document.querySelector('[data-os="' + os + '"]');
+mine.classList.add('main');
+mine.querySelector('h2').insertAdjacentHTML('beforeend', '<span class="tag">ВАШЕ УСТРОЙСТВО</span>');
+document.getElementById('list').prepend(mine);
+
+// уже установлено и открыто как приложение — сразу в плеер
+if (matchMedia('(display-mode: standalone)').matches || navigator.standalone) location.replace('/');
+
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
+// Chrome и Edge дают поставить сайт одной кнопкой
+let prompt = null;
+addEventListener('beforeinstallprompt', e => {
+  e.preventDefault(); prompt = e;
+  document.querySelectorAll('[data-install]').forEach(b => b.hidden = false);
+  document.querySelectorAll('[data-manual]').forEach(b => b.hidden = true);
+});
+document.querySelectorAll('[data-install]').forEach(b => b.onclick = async () => {
+  if (!prompt) return;
+  prompt.prompt();
+  const r = await prompt.userChoice;
+  if (r.outcome === 'accepted') b.textContent = 'Установлено ✓';
+  prompt = null;
+});
+</script>
+</body>
+</html>

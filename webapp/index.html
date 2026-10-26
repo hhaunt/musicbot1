@@ -5,6 +5,13 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
 <title>MusicCloud</title>
 <link rel="icon" href="/api/logo">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/api/icon/180.png">
+<meta name="theme-color" content="#000000">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="MusicCloud">
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
 :root{
@@ -56,7 +63,7 @@ svg{display:block;fill:currentColor}
 /* плеер прозрачный (сквозь него видны обои), поэтому основной экран под ним прячется */
 body.open-player #app{opacity:0;transform:scale(.97);pointer-events:none}
 /* в полноэкранном режиме сверху оказываются вырез экрана и кнопки Telegram — отступаем от них */
-:root{--sat:calc(var(--tg-safe-area-inset-top,0px) + var(--tg-content-safe-area-inset-top,0px))}
+:root{--sat:max(env(safe-area-inset-top,0px),calc(var(--tg-safe-area-inset-top,0px) + var(--tg-content-safe-area-inset-top,0px)))}
 header{padding:calc(18px + var(--sat)) 20px 12px;flex:none}
 .ava svg{width:15px;height:15px}
 .brand{display:flex;align-items:center;gap:10px;font-weight:700;letter-spacing:.14em;font-size:13px}
@@ -498,6 +505,11 @@ body.open-sheet #shade{opacity:1;pointer-events:auto}
   </div>
   <div class="note" style="padding:10px 0 0">Свой файл — фото, GIF или короткое видео до 25 МБ.</div>
   <div class="dimrow">Затемнение <input id="walldim" class="rng" type="range" min="15" max="90" value="60" aria-label="Затемнение обоев"></div>
+  <h2 class="sec">ПРИЛОЖЕНИЕ</h2>
+  <div class="pillrow" style="padding-bottom:0">
+    <button class="pill inv" id="getapp">Скачать на телефон и компьютер</button>
+  </div>
+  <div class="note" style="padding:10px 0 0">Android, iPhone и Windows — вход тем же аккаунтом Telegram.</div>
 </section>
 <div id="toast"></div>
 <audio id="audio" preload="auto"></audio>
@@ -1421,6 +1433,12 @@ async function saveProfile(body, done) {
     S.me = await api('me'); refreshAvatar(); avatar($('#setava')); toast(done);
   } catch (err) { toast(err.message); }
 }
+/* страница загрузки — в обычном браузере: из Telegram сайт на экран телефона не установить */
+$('#getapp').onclick = () => {
+  tap();
+  const url = location.origin + '/app';
+  if (tg && tg.initData && tg.openLink) tg.openLink(url); else window.open(url, '_blank');
+};
 $('#setzoom').addEventListener('input', e => { store.set('mc-zoom', e.target.value); applyZoom(e.target.value); });
 $('#setsave').onclick = () => { tap(); saveProfile({name: $('#setname').value}, 'Имя сохранено'); };
 $('#setreset').onclick = () => { tap(); $('#setname').value = ''; saveProfile({name: '', reset_photo: true}, 'Имя и фото — как в Telegram'); };
@@ -1738,6 +1756,9 @@ if ('mediaSession' in navigator) {
   buildEq(); paintPlay(); applyVolume(); avatar($('#avatar'));
   const logo = h('img', {src: '/api/logo', alt: ''});  // аватарка бота вместо точки
   logo.onload = () => $('#dot').replaceWith(logo);
+  // установленное на телефон приложение (PWA) открывается и без сети
+  if (DESKTOP && 'serviceWorker' in navigator && !window.chrome?.webview)
+    navigator.serviceWorker.register('/sw.js').catch(() => {});
   if (DESKTOP && !desktopToken.get()) return desktopLogin();
   try {
     S.me = await api('me');

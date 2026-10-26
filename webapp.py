@@ -1165,6 +1165,87 @@ async def api_logo(request):
                         headers={"Cache-Control": "public, max-age=3600"})
 
 
+# ── установка на телефон и компьютер ─────────────────────────────────────
+# Сайт ставится как приложение (PWA): на Android — кнопкой «Установить», на iPhone —
+# «Поделиться → На экран „Домой“». Для Windows лежит готовый архив в downloads/.
+
+DOWNLOADS_DIR = BASE_DIR / "downloads"
+_icons: dict[int, bytes] = {}
+
+
+@routes.get("/manifest.webmanifest")
+async def manifest(request):
+    icons = [{"src": f"/api/icon/{s}.png", "sizes": f"{s}x{s}", "type": "image/png", "purpose": "any"}
+             for s in (192, 512)]
+    icons.append({"src": "/api/icon/512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"})
+    return web.json_response({
+        "name": BRAND, "short_name": BRAND, "id": "/", "start_url": "/", "scope": "/",
+        "display": "standalone", "orientation": "portrait",
+        "background_color": "#000000", "theme_color": "#000000", "lang": "ru",
+        "description": "Музыка, волна и плейлисты", "icons": icons,
+    }, content_type="application/manifest+json")
+
+
+@routes.get("/api/icon/{size:\\d+}.png")
+async def api_icon(request):
+    size = int(request.match_info["size"])
+    if size not in (180, 192, 512):
+        raise web.HTTPNotFound()
+    if size not in _icons:
+        logo = request.app["logo"]
+        if not logo:
+            raise web.HTTPNotFound()
+        from io import BytesIO
+        from PIL import Image, ImageOps
+        img = ImageOps.fit(Image.open(BytesIO(logo)).convert("RGB"), (size, size), Image.LANCZOS)
+        out = BytesIO()
+        img.save(out, "PNG")
+        _icons[size] = out.getvalue()
+    return web.Response(body=_icons[size], content_type="image/png",
+                        headers={"Cache-Control": "public, max-age=86400"})
+
+
+# Сервис-воркер нужен, чтобы приложение устанавливалось и открывалось без сети хотя бы до
+# экрана «нет интернета». Музыку и API он не трогает — они всегда идут напрямую на сервер.
+SERVICE_WORKER = """
+const CACHE = 'mc-shell-1';
+self.addEventListener('install', e => {
+  self.skipWaiting();
+  e.waitUntil(caches.open(CACHE).then(c => c.add('/')).catch(() => {}));
+});
+self.addEventListener('activate', e => e.waitUntil(self.clients.claim()));
+self.addEventListener('fetch', e => {
+  if (e.request.mode !== 'navigate') return;
+  e.respondWith(fetch(e.request).then(r => {
+    if (r.ok && new URL(e.request.url).pathname === '/') {
+      const copy = r.clone(); caches.open(CACHE).then(c => c.put('/', copy));
+    }
+    return r;
+  }).catch(() => caches.match('/')));
+});
+"""
+
+
+@routes.get("/sw.js")
+async def service_worker(request):
+    return web.Response(text=SERVICE_WORKER, content_type="application/javascript",
+                        headers={"Cache-Control": "no-cache", "Service-Worker-Allowed": "/"})
+
+
+@routes.get("/app")
+async def download_page(request):
+    return web.FileResponse(BASE_DIR / "webapp" / "app.html", headers={"Cache-Control": "no-cache"})
+
+
+@routes.get("/download/windows")
+async def download_windows(request):
+    path = DOWNLOADS_DIR / "MusicCloud-Windows.zip"
+    if not path.exists():
+        raise web.HTTPNotFound()
+    return web.FileResponse(path, headers={
+        "Content-Disposition": 'attachment; filename="MusicCloud-Windows.zip"'})
+
+
 async def start(bot: Bot, dp: Dispatcher, logo: bytes | None = None) -> web.AppRunner:
     app = web.Application()
     app["bot"] = bot

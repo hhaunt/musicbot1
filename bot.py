@@ -279,10 +279,24 @@ async def cmd_desktop_login(msg: Message, command: CommandObject, state: FSMCont
         await db.upsert_user(user.id, " ".join(x for x in (user.first_name, user.last_name) if x)[:64],
                              user.username, None, PROFILES_PUBLIC_DEFAULT)
     if await webapp.confirm_desktop_login(command.args[len("login_"):], user.id):
-        await msg.answer("✓  Вход в MusicCloud на компьютере выполнен — вернитесь в приложение.\n"
+        await msg.answer("✓  Вход в MusicCloud выполнен — вернитесь в приложение.\n"
                          "Если это были не вы, просто не нажимайте такие ссылки: без них войти нельзя.")
     else:
         await msg.answer("✕  Ссылка для входа устарела. Нажмите «Войти через Telegram» в приложении ещё раз.")
+
+
+@router.message(Command("app"))
+async def cmd_app(msg: Message):
+    """Ссылка на страницу загрузки: Android, iPhone, Windows."""
+    if not WEBAPP_URL:
+        await msg.answer("Приложение пока не настроено.")
+        return
+    await msg.answer(
+        "📲  <b>MusicCloud на любом устройстве</b>\n"
+        f"{WEBAPP_URL}/app\n\n"
+        "Откройте ссылку в браузере на телефоне или компьютере — там кнопка установки "
+        "для Android, инструкция для iPhone и программа для Windows.",
+        disable_web_page_preview=True)
 
 
 @router.message(CommandStart())
