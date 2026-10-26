@@ -75,9 +75,12 @@ li b{color:var(--fg);font-weight:600}
 
     <section class="card" data-os="other">
       <h2>Mac, Linux и другие компьютеры</h2>
-      <p>Откройте страницу в Chrome или Edge и нажмите значок установки в адресной строке
-        (или меню → «Установить MusicCloud»). Можно и просто слушать в браузере.</p>
+      <p>Откройте страницу в Chrome, Chromium, Edge или Яндекс Браузере и нажмите значок установки
+        в адресной строке (или меню → «Установить MusicCloud»). Можно и просто слушать в браузере.</p>
+      <p data-firefox hidden style="margin-top:8px;color:var(--fg)">Firefox на компьютере не умеет
+        устанавливать сайты как приложения. Слушайте прямо в нём или откройте эту страницу в Chrome / Chromium.</p>
       <button class="btn" data-install hidden>Установить</button>
+      <a class="btn" href="/" data-open>Открыть плеер</a>
     </section>
   </div>
 
@@ -103,6 +106,8 @@ document.getElementById('list').prepend(mine);
 // уже установлено и открыто как приложение — сразу в плеер
 if (matchMedia('(display-mode: standalone)').matches || navigator.standalone) location.replace('/');
 
+if (/Firefox\//.test(ua) && !/Android/.test(ua))
+  document.querySelectorAll('[data-firefox]').forEach(p => p.hidden = false);
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
 // Chrome и Edge дают поставить сайт одной кнопкой
 let prompt = null;
