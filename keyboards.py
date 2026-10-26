@@ -21,6 +21,8 @@ def menu() -> InlineKeyboardMarkup:
     b.row(Btn(text="≡  Плейлисты", callback_data="pls"))
     if WEBAPP_URL:
         b.row(Btn(text="▷  Открыть плеер", web_app=WebAppInfo(url=WEBAPP_URL)))
+        # обычная ссылка, а не мини-приложение: ставить на экран телефона можно только из браузера
+        b.row(Btn(text="📲  Скачать на любое устройство", url=WEBAPP_URL + "/app"))
     return b.as_markup()
 
 
